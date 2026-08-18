@@ -86,9 +86,10 @@ HOOK_HOLD = 3.0                          # seconds the hook and credit stay up
 HOOK_FADE = 0.5                          # seconds to fade them out
 # Split layout: facecam on top, gameplay below. 35/65 puts the face big enough
 # to read at thumbnail size while leaving the game the majority of the frame.
-# Two or three cams share that band as equal tiles. Past three the tiles are
-# too narrow to read a face in, so those clips get normal framing instead.
-MAX_CAMS = 3
+# Up to four cams share that band: two or three in a row, four as a 2x2 grid.
+# Past four the tiles stop being big enough to read a face in, so those clips
+# get normal framing instead.
+MAX_CAMS = 4
 SPLIT_TOP_H = int(H * 0.35) // 2 * 2      # 672, kept even for libx264
 SPLIT_BOTTOM_H = H - SPLIT_TOP_H          # 1248
 STYLE = "auto"        # "auto" | "split" | "fill" (full-frame) | "blur" (letterboxed)
@@ -291,8 +292,8 @@ def _split_chain(hook_size, cams):
     """Facecam(s) stacked on top of the gameplay — the standard clip look.
 
     cams is a list of (x, y, w, h) boxes in source pixels, left to right. One
-    cam fills the top band; a co-stream's two or three share it as equal tiles,
-    so nobody gets cropped out of their own clip. Each tile is cover-cropped,
+    cam fills the top band; a co-stream's two or three share it as a row and
+    four as a 2x2 grid, so nobody gets cropped out of their own clip. Each tile is cover-cropped,
     which keeps the middle of a webcam — where a face sits — and discards the
     edges of the room.
 
@@ -300,22 +301,39 @@ def _split_chain(hook_size, cams):
     fill, so it keeps ~49% of the source width instead of ~32%.
     """
     n = len(cams)
-    tile_w = (W // n) // 2 * 2               # even, for libx264
+    # Up to three sit in one row. Four go 2x2: a single row of four would be
+    # 270px tiles, too narrow to keep a face inside a cover-crop.
+    cols = n if n <= 3 else 2
+    rows = -(-n // cols)
+    tile_w = (W // cols) // 2 * 2            # even, for libx264
+    tile_h = (SPLIT_TOP_H // rows) // 2 * 2
     labels = "".join(f"[c{i}]" for i in range(n))
 
     parts = [f"[0:v]split={n + 1}{labels}[game];"]
     for i, (cx, cy, cw, ch) in enumerate(cams):
-        # Last tile absorbs any rounding so the row is exactly W wide.
-        w = tile_w if i < n - 1 else W - tile_w * (n - 1)
+        # Last tile in a row absorbs rounding so the row is exactly W wide;
+        # the bottom row absorbs it likewise so the band is exactly SPLIT_TOP_H.
+        last_col = (i % cols == cols - 1) or i == n - 1
+        w = W - tile_w * (cols - 1) if last_col and cols > 1 else tile_w
+        h = (SPLIT_TOP_H - tile_h * (rows - 1)
+             if rows > 1 and i // cols == rows - 1 else tile_h)
         parts.append(
             f"[c{i}]crop={cw}:{ch}:{cx}:{cy},"
-            f"scale={w}:{SPLIT_TOP_H}:force_original_aspect_ratio=increase:"
-            f"flags=lanczos,crop={w}:{SPLIT_TOP_H}[t{i}];")
-    if n > 1:
+            f"scale={w}:{h}:force_original_aspect_ratio=increase:"
+            f"flags=lanczos,crop={w}:{h}[t{i}];")
+
+    if n == 1:
+        parts.append("[t0]null[camrow];")
+    elif rows == 1:
         parts.append("".join(f"[t{i}]" for i in range(n))
                      + f"hstack=inputs={n}[camrow];")
     else:
-        parts.append("[t0]null[camrow];")
+        for r in range(rows):
+            members = [i for i in range(n) if i // cols == r]
+            parts.append("".join(f"[t{i}]" for i in members)
+                         + f"hstack=inputs={len(members)}[r{r}];")
+        parts.append("".join(f"[r{r}]" for r in range(rows))
+                     + f"vstack=inputs={rows}[camrow];")
     parts.append(
         f"[game]scale={W}:{SPLIT_BOTTOM_H}:force_original_aspect_ratio=increase:"
         f"flags=lanczos,crop={W}:{SPLIT_BOTTOM_H}[gamef];"

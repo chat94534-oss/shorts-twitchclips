@@ -39,6 +39,10 @@ MAX_FACE = 0.42
 # Plausible webcam overlay geometry, as fractions of the frame.
 CAM_W_RANGE = (0.10, 0.42)
 CAM_H_RANGE = (0.12, 0.60)
+# A webcam is 16:9 (1.78) or 4:3 (1.33). Chat panels, sponsor tickers and
+# alert bars are far wider or far taller, and being static they trip the same
+# false face detection in every frame — persistence alone will not reject them.
+CAM_ASPECT_RANGE = (0.95, 2.10)
 EDGE_MARGIN = 0.02     # keep the border search off the very frame edge
 
 
@@ -185,6 +189,8 @@ def _cam_from_edges(edges, face, fw, fh):
         return None
     if not (fh * CAM_H_RANGE[0] <= cam_h <= fh * CAM_H_RANGE[1]):
         return None
+    if not (CAM_ASPECT_RANGE[0] <= cam_w / cam_h <= CAM_ASPECT_RANGE[1]):
+        return None
     # The box has to actually contain the face it was built around.
     if not (cam_x - m <= x and x + w <= cam_x + cam_w + m
             and cam_y - m <= y and y + h <= cam_y + cam_h + m):
@@ -204,9 +210,9 @@ def _load_cv2():
 def detect_all(path):
     """Every webcam overlay found, ordered left to right.
 
-    A co-stream carries two or three cams; they share the top band so nobody
-    gets cropped out. Past three the tiles are too narrow to read a face in, so
-    the caller falls back to normal framing.
+    A co-stream carries several cams; up to four share the top band so nobody
+    gets cropped out. Past that the tiles stop being big enough to read a face
+    in, so the caller falls back to normal framing.
     """
     try:
         _load_cv2()
