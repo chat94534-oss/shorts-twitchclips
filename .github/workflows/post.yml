@@ -35,7 +35,22 @@ jobs:
       - name: check for private data
         run: python check_private.py
       - name: install ffmpeg + fonts
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-liberation
+        # The runner image usually ships both already. Only touch apt when
+        # something is genuinely missing: an `apt-get update` against a slow
+        # mirror has stalled this step for 15+ minutes before now.
+        timeout-minutes: 6
+        run: |
+          need=""
+          command -v ffmpeg >/dev/null || need="$need ffmpeg"
+          fc-list 2>/dev/null | grep -qi liberation || need="$need fonts-liberation"
+          if [ -z "$need" ]; then
+            echo "ffmpeg and fonts already present:"
+            ffmpeg -version | head -1
+            exit 0
+          fi
+          echo "installing:$need"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq $need
       - name: install python deps
         run: pip install -q -r requirements.txt
       - name: write secrets
