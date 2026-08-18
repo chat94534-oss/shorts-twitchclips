@@ -83,14 +83,14 @@ def _faces(frame, cascade):
     return [tuple(map(int, f)) for f in found]
 
 
-def _face_anchor(frames, cascade):
-    """The face that keeps reappearing in one place, or None."""
+def _face_anchors(frames, cascade):
+    """Every face that keeps reappearing in one place — one per webcam."""
     fw = frames[0].shape[1]
     hits = []
     for f in frames:
         hits.extend(_faces(f, cascade))
     if not hits:
-        return None
+        return []
 
     tol = fw * CLUSTER_TOL
     groups = []
@@ -106,12 +106,13 @@ def _face_anchor(frames, cascade):
         else:
             groups.append({"cx": cx, "cy": cy, "boxes": [(x, y, w, h)]})
 
-    groups.sort(key=lambda g: len(g["boxes"]), reverse=True)
-    best = groups[0]
-    if len(best["boxes"]) < MIN_HITS:
-        return None          # a face that never stays put is not a webcam
-    n = len(best["boxes"])
-    return tuple(sum(b[i] for b in best["boxes"]) // n for i in range(4))
+    faces = []
+    for g in groups:
+        if len(g["boxes"]) < MIN_HITS:
+            continue         # a face that never stays put is not a webcam
+        n = len(g["boxes"])
+        faces.append(tuple(sum(b[i] for b in g["boxes"]) // n for i in range(4)))
+    return faces
 
 
 def _persistent_edges(frames):
@@ -209,11 +210,20 @@ def detect(path):
     frames = _sample_frames(path)
     if len(frames) < 3:
         return None
-    face = _face_anchor(frames, _cascade())
-    if face is None:
+    faces = _face_anchors(frames, _cascade())
+    if not faces:
         return None
     fh, fw = frames[0].shape[:2]
-    return _cam_from_edges(_persistent_edges(frames), face, fw, fh)
+    edges = _persistent_edges(frames)
+
+    # A co-stream shows two cams — the host's and a guest's. Take the LARGEST
+    # valid box: on someone's own channel their own cam is the bigger one, and
+    # the credit we burn in names the broadcaster. Picking by detection count
+    # instead put a guest's face under the host's name.
+    boxes = [b for b in (_cam_from_edges(edges, f, fw, fh) for f in faces) if b]
+    if not boxes:
+        return None
+    return max(boxes, key=lambda b: b[2] * b[3])
 
 
 def main():
