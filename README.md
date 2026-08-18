@@ -43,12 +43,14 @@ It runs two places: as a CI step before anything builds, and as a pre-commit
 hook. The hook lives in `.git/hooks/` and is not cloned, so install it once per
 machine:
 
-```
-printf '#!/bin/sh
+Create `.git/hooks/pre-commit` containing:
+
+```sh
+#!/bin/sh
 exec python check_private.py --staged
-' > .git/hooks/pre-commit
-chmod +x .git/hooks/pre-commit
 ```
+
+then `chmod +x .git/hooks/pre-commit`.
 
 Note that scrubbing a file does not scrub git history — a value that was ever
 pushed stays reachable until the history itself is rewritten.
