@@ -28,6 +28,7 @@ import time
 from zoneinfo import ZoneInfo
 
 import facecam
+import hooks
 import twitch
 
 for _s in (sys.stdout, sys.stderr):
@@ -230,13 +231,16 @@ def write_copy(clip):
     game = clip.get("game_name", "Twitch")
     original = _clean(clip.get("title"), 90)
 
-    hook = original if len(original) >= 10 and len(original.split()) >= 2 else ""
-    if not hook:
-        idx = sum(ord(c) for c in clip.get("id", "")) % len(GENERIC_HOOKS)
-        hook = GENERIC_HOOKS[idx]
+    written = hooks.write(streamer, game, original)
+    if written:
+        hook, title = written["hook"], written["title"]
+    else:
+        hook = original if len(original) >= 10 and len(original.split()) >= 2 else ""
+        if not hook:
+            idx = sum(ord(c) for c in clip.get("id", "")) % len(GENERIC_HOOKS)
+            hook = GENERIC_HOOKS[idx]
+        title = original or f"{streamer} - {game}"
     hook = hook[:46]
-
-    title = original or f"{streamer} - {game}"
     title = f"{title[:70]} | {streamer} #shorts"[:100]
 
     # Keywords first, links last: YouTube reads the opening lines for topic,

@@ -16,7 +16,8 @@ run.
   Crons are UTC: **in November (DST ends) bump each cron hour +1** or posts shift
   an hour early.
 - **Secrets (repo settings):** `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET`,
-  `CLIENT_SECRET_JSON`, `TOKEN_JSON`.
+  `CLIENT_SECRET_JSON`, `TOKEN_JSON`, `GEMINI_API_KEY` (optional — without
+  it the hook falls back to the clip's own Twitch title).
 - **Batches:** six scheduled runs a day build 3 slots each — 18 of capacity for
   11 slots. A failed run costs nothing: the next batch measures the gap from
   videos actually posted and makes it up.
@@ -29,6 +30,7 @@ Credentials come from `.env` (gitignored):
 ```
 TWITCH_CLIENT_ID=xxxx
 TWITCH_CLIENT_SECRET=xxxx
+GEMINI_API_KEY=xxxx
 ```
 
 ```
