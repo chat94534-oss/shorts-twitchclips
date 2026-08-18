@@ -367,10 +367,16 @@ def _fill_chain(hook_size):
 # Everything else is gameplay, where the game is the content and the facecam is
 # a small corner overlay worth losing to fill the screen.
 FACE_IS_THE_CONTENT = {
-    "Just Chatting", "Special Events", "Sports", "Talk Shows & Podcasts",
-    "Travel & Outdoors", "Music", "ASMR", "Art", "Politics", "Food & Drink",
-    "Fitness & Health", "Watch Parties", "Science & Technology",
-    "Software and Game Development", "Games + Demos", "Animals, Aquariums, and Zoos",
+    # camera on a person
+    "Just Chatting", "IRL", "Always On", "Special Events", "Sports",
+    "Talk Shows & Podcasts", "Travel & Outdoors", "Music", "ASMR", "Art",
+    "Politics", "Food & Drink", "Fitness & Health",
+    "Animals, Aquariums, and Zoos", "Makers & Crafting", "Beauty & Body Art",
+    "DJs", "Pools, Hot Tubs, and Beaches",
+    # a desktop, a canvas, a dashboard — full width matters, centre crop lands
+    # on chat or on nothing
+    "Watch Parties", "Science & Technology", "Software and Game Development",
+    "Games + Demos", "Crypto", "Slots", "Virtual Casino", "Sports Betting",
 }
 
 
