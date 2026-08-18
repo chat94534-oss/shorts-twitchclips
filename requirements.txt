@@ -3,3 +3,4 @@ google-auth-oauthlib>=1.2.0
 google-auth-httplib2>=0.2.0
 yt-dlp>=2024.1.1
 tzdata>=2024.1
+opencv-python-headless<5

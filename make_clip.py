@@ -27,6 +27,7 @@ import textwrap
 import time
 from zoneinfo import ZoneInfo
 
+import facecam
 import twitch
 
 for _s in (sys.stdout, sys.stderr):
@@ -83,7 +84,11 @@ HOOK_TAIL_STOPWORDS = {
 CREDIT_TOP_Y = 110                       # above the hook; YouTube's UI covers the bottom
 HOOK_HOLD = 3.0                          # seconds the hook and credit stay up
 HOOK_FADE = 0.5                          # seconds to fade them out
-STYLE = "auto"                           # "auto" | "fill" (full-frame) | "blur" (letterboxed)
+# Split layout: facecam on top, gameplay below. 35/65 puts the face big enough
+# to read at thumbnail size while leaving the game the majority of the frame.
+SPLIT_TOP_H = int(H * 0.35) // 2 * 2      # 672, kept even for libx264
+SPLIT_BOTTOM_H = H - SPLIT_TOP_H          # 1248
+STYLE = "auto"        # "auto" | "split" | "fill" (full-frame) | "blur" (letterboxed)
 
 PRESET = os.environ.get("X264_PRESET", "medium")
 FONT = (r"C\:/Windows/Fonts/arialbd.ttf" if os.name == "nt"
@@ -279,6 +284,28 @@ def _blur_chain(hook_size):
     )
 
 
+def _split_chain(hook_size, cam):
+    """Facecam stacked on top of the gameplay — the standard clip-channel look.
+
+    cam is (x, y, w, h) in source pixels, from facecam.detect(). The cam fills
+    the top band and the gameplay the rest; the gameplay is centre-cropped, but
+    from a shorter box than full-frame fill, so it keeps ~49% of the width
+    instead of ~32%.
+    """
+    cx, cy, cw, ch = cam
+    return (
+        f"[0:v]split=2[cam][game];"
+        f"[cam]crop={cw}:{ch}:{cx}:{cy},"
+        f"scale={W}:{SPLIT_TOP_H}:force_original_aspect_ratio=increase:"
+        f"flags=lanczos,crop={W}:{SPLIT_TOP_H}[camf];"
+        f"[game]scale={W}:{SPLIT_BOTTOM_H}:force_original_aspect_ratio=increase:"
+        f"flags=lanczos,crop={W}:{SPLIT_BOTTOM_H}[gamef];"
+        f"[camf][gamef]vstack=2[base];"
+        f"[base]{_drawtext('credit.txt', CREDIT_SIZE, CREDIT_TOP_Y)},"
+        f"{_drawtext('hook.txt', hook_size, SPLIT_TOP_H + 40)}[v]"
+    )
+
+
 def _fill_chain(hook_size):
     """Clip scaled to cover the whole 9:16 frame, centre-cropped.
 
@@ -355,7 +382,7 @@ def fit_hook(text, max_lines=2):
     return textwrap.fill(trimmed, per_line), HOOK_SIZES[-1]
 
 
-def render(src, run_dir, copy, out_name="short.mp4", style=None):
+def render(src, run_dir, copy, out_name="short.mp4", style=None, cam=None):
     """One ffmpeg pass to a finished 1080x1920 Short.
 
     Text comes from files rather than inline strings so drawtext's escaping
@@ -373,8 +400,12 @@ def render(src, run_dir, copy, out_name="short.mp4", style=None):
               newline="\n") as f:
         f.write(copy["credit"])
 
-    vf = (_fill_chain(hook_size) if style == "fill"
-          else _blur_chain(hook_size))
+    if style == "split" and cam:
+        vf = _split_chain(hook_size, cam)
+    elif style == "fill":
+        vf = _fill_chain(hook_size)
+    else:
+        vf = _blur_chain(hook_size)
     run(["ffmpeg", "-y", "-i", os.path.basename(src),
          "-filter_complex", vf, "-map", "[v]", "-map", "0:a?",
          "-r", str(FPS), "-c:v", "libx264", "-preset", PRESET, "-crf", "18",
@@ -490,8 +521,18 @@ def produce_one(candidates, state, args, publish_at):
             download_clip(clip["url"], src)
             copy = write_copy(clip)
             log(f"  hook: {copy['hook']}")
-            video = render(src, run_dir, copy,
-                           style=args.style or style_for(clip))
+            style = args.style or style_for(clip)
+            cam = None
+            if style == "fill":
+                # Only gameplay: chat and IRL clips are letterboxed already, so
+                # the cam is on screen and there is nothing to look for.
+                cam = facecam.detect(src)
+                if cam:
+                    style = "split"
+                    log(f"  facecam at {cam} -> split layout")
+                else:
+                    log("  no facecam found -> full-frame")
+            video = render(src, run_dir, copy, style=style, cam=cam)
         except Exception as e:  # noqa: BLE001
             log(f"  clip failed ({e}); marking spent and taking the next one.")
             state.setdefault("seen", []).append(clip["id"])
@@ -519,7 +560,7 @@ def main():
     ap.add_argument("--privacy", default="public",
                     choices=["public", "unlisted", "private"])
     ap.add_argument("--no-upload", action="store_true")
-    ap.add_argument("--style", default=None, choices=["fill", "blur"],
+    ap.add_argument("--style", default=None, choices=["split", "fill", "blur"],
                     help="force a framing; default picks per clip — fill "
                          "(centre-cropped, fills the frame) for gameplay, blur "
                          "(letterboxed) for chat/IRL categories")
