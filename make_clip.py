@@ -286,23 +286,27 @@ def _fill_chain(hook_size):
     )
 
 
-# Categories whose clips are a DESKTOP — a browser, an editor, a canvas, a
-# dashboard — where the interesting thing is spread across the full width and a
-# centre crop lands on chat or on nothing. These keep the letterbox.
+# Categories where the PERSON is the content, not a game: reactions, IRL,
+# podcasts, desktops. A 9:16 crop of 16:9 footage keeps only the middle ~32% of
+# the width, and facecams live in the corners — so filling the frame here
+# throws away the thing the clip is about. These keep the letterbox, which
+# shows the whole frame at the cost of height.
 #
-# Deliberately narrow. Just Chatting, Sports, and IRL are camera footage: they
-# crop fine and look far better filling the frame, so they are NOT listed here.
-SCREEN_SHARE_CATEGORIES = {
-    "Software and Game Development", "Games + Demos", "Art", "Music",
-    "Watch Parties", "Science & Technology",
+# Everything else is gameplay, where the game is the content and the facecam is
+# a small corner overlay worth losing to fill the screen.
+FACE_IS_THE_CONTENT = {
+    "Just Chatting", "Special Events", "Sports", "Talk Shows & Podcasts",
+    "Travel & Outdoors", "Music", "ASMR", "Art", "Politics", "Food & Drink",
+    "Fitness & Health", "Watch Parties", "Science & Technology",
+    "Software and Game Development", "Games + Demos", "Animals, Aquariums, and Zoos",
 }
 
 
 def style_for(clip):
-    """Pick framing per clip: fill for gameplay, blur for everything else."""
+    """Pick framing per clip: fill for gameplay, blur when the person matters."""
     if STYLE != "auto":
         return STYLE
-    return "blur" if clip.get("game_name") in SCREEN_SHARE_CATEGORIES else "fill"
+    return "blur" if clip.get("game_name") in FACE_IS_THE_CONTENT else "fill"
 
 
 def fit_hook(text, max_lines=2):

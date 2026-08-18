@@ -74,12 +74,36 @@ jobs:
           fi
       - name: persist state
         if: always()
+        # This step MUST land. state.json is what stops a clip being uploaded
+        # twice, so a failed persist means a duplicate video on the channel —
+        # which has happened. A rebase treats two runs appending to the same
+        # append-only file as a conflict, so take the union instead and retry
+        # against whatever the remote moved to.
         run: |
           git config user.name "autopost"
           git config user.email "actions@users.noreply.github.com"
-          git add state.json logs/history.csv 2>/dev/null || true
-          if ! git diff --cached --quiet; then
-            git commit -m "state: $(date -u +%Y-%m-%d\ %H:%M) UTC [skip ci]"
-            git pull --rebase
-            git push
-          fi
+          # Keep this run's own results outside the work tree, so resetting
+          # onto the remote tip cannot throw them away.
+          mkdir -p /tmp/persist/logs
+          cp state.json /tmp/persist/state.json 2>/dev/null || true
+          cp logs/history.csv /tmp/persist/logs/history.csv 2>/dev/null || true
+          for attempt in 1 2 3 4 5; do
+            git fetch -q origin main
+            git reset -q --hard origin/main
+            cp /tmp/persist/state.json state.json 2>/dev/null || true
+            cp /tmp/persist/logs/history.csv logs/history.csv 2>/dev/null || true
+            python merge_state.py origin/main
+            git add state.json logs/history.csv 2>/dev/null || true
+            if git diff --cached --quiet; then
+              echo "nothing new to persist"
+              exit 0
+            fi
+            git commit -q -m "state: $(date -u +%Y-%m-%d\ %H:%M) UTC [skip ci]"
+            if git push -q origin HEAD:main; then
+              echo "persisted on attempt $attempt"
+              exit 0
+            fi
+            echo "push raced with another run; retrying"
+          done
+          echo "::error::could not persist state after 5 attempts"
+          exit 1
