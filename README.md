@@ -33,6 +33,26 @@ python make_clip.py --no-upload  # build one real Short, upload nothing
 python make_clip.py --fill-day   # the CI path
 ```
 
+## Keeping private data out
+
+This repo is public. `check_private.py` matches credential and personal-data
+*shapes* (emails, OAuth secrets, local user paths) rather than a list of real
+values, since a deny-list holding the real values would itself be the leak.
+
+It runs two places: as a CI step before anything builds, and as a pre-commit
+hook. The hook lives in `.git/hooks/` and is not cloned, so install it once per
+machine:
+
+```
+printf '#!/bin/sh
+exec python check_private.py --staged
+' > .git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
+```
+
+Note that scrubbing a file does not scrub git history — a value that was ever
+pushed stays reachable until the history itself is rewritten.
+
 ## Why it is built this way
 
 - **Twitch, not YouTube, as the source.** Clips are already 10–60s and already
