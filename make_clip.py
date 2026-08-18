@@ -205,6 +205,16 @@ GENERIC_HOOKS = [
 ]
 
 
+def _hashtags(game, streamer):
+    """#shorts plus the words a viewer would actually search."""
+    tags = ["shorts", "twitch", "gaming"]
+    for name in (game, streamer):
+        word = "".join(c for c in str(name or "") if c.isalnum()).lower()
+        if word and word not in tags:
+            tags.insert(2, word)
+    return " ".join("#" + t for t in tags[:5])
+
+
 def write_copy(clip):
     """Hook line for the video, plus title/description/tags for YouTube.
 
@@ -229,9 +239,13 @@ def write_copy(clip):
     title = original or f"{streamer} - {game}"
     title = f"{title[:70]} | {streamer} #shorts"[:100]
 
+    # Keywords first, links last: YouTube reads the opening lines for topic,
+    # and the first three hashtags render above the title.
     description = (
         f"{original}\n\n"
-        f"{streamer} playing {game}\n"
+        f"{streamer} playing {game} on Twitch. Best Twitch clips, funny "
+        f"moments and stream highlights, posted daily.\n\n"
+        f"{_hashtags(game, streamer)}\n\n"
         f"Original clip: {clip['url']}\n"
         f"Watch {streamer} live: https://twitch.tv/{streamer}"
     )
