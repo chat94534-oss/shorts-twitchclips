@@ -24,7 +24,9 @@ from googleapiclient.errors import HttpError
 
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
-    "https://www.googleapis.com/auth/youtube.readonly",
+    # force-ssl, not readonly: the pipeline edits titles and descriptions on
+    # videos it already posted. It is a superset of readonly.
+    "https://www.googleapis.com/auth/youtube.force-ssl",
 ]
 TOKEN_FILE = "token.json"
 
@@ -34,7 +36,10 @@ def get_service():
         raise SystemExit(
             f"Missing {TOKEN_FILE}. Run: python youtube_authorize.py"
         )
-    creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+    # No scope list here on purpose: the token carries its own, so a repo
+    # secret written before the scopes widened keeps working instead of
+    # failing the refresh on a mismatch.
+    creds = Credentials.from_authorized_user_file(TOKEN_FILE)
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
         with open(TOKEN_FILE, "w", encoding="utf-8") as f:
