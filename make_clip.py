@@ -1,0 +1,428 @@
+#!/usr/bin/env python3
+"""Twitch clip -> YouTube Short, fully automated.
+
+    twitch.discover()  ->  yt-dlp  ->  ffmpeg 9:16  ->  youtube_upload.py
+
+One run builds every remaining slot for the day and hands each video to
+YouTube's own scheduler via publishAt, so GitHub's flaky cron only has to
+fire once. State (which clips are spent) is committed back by the workflow.
+
+    python make_clip.py --fill-day          # the CI path
+    python make_clip.py --no-upload         # render one locally, upload nothing
+    python make_clip.py --privacy unlisted  # one video, now, unlisted
+"""
+import argparse
+import csv
+import datetime as dt
+import json
+import os
+import random
+import re
+import shutil
+import subprocess
+import sys
+import textwrap
+import time
+import urllib.parse
+import urllib.request
+from zoneinfo import ZoneInfo
+
+import twitch
+
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = HERE
+STATE_FILE = os.path.join(HERE, "state.json")
+RUNS_DIR = os.path.join(HERE, "runs")
+LOGS_DIR = os.path.join(HERE, "logs")
+HISTORY_CSV = os.path.join(LOGS_DIR, "history.csv")
+TOKEN_EXPIRED_FLAG = os.path.join(LOGS_DIR, "TOKEN_EXPIRED.txt")
+LOCK_FILE = os.path.join(LOGS_DIR, "run.lock")
+KEEP_RUNS_DAYS = 3
+
+TZ = ZoneInfo("America/New_York")
+PUBLISH_SLOTS = [(12, 0), (15, 0), (18, 0), (21, 0)]
+
+W, H, FPS = 1080, 1920, 30
+# The clip sits in a fixed box, scaled to fit (never distorted, never cropped).
+# 1242 is 1.15x the frame width, so it fills more height and the blur bars stay
+# thin. force_original_aspect_ratio=decrease means an odd-shaped source only
+# ever comes out SMALLER than this box, so the text positions below stay clear.
+FG_W, FG_H = 1242, 698
+FG_TOP = (H - FG_H) // 2                 # 611
+HOOK_Y = FG_TOP - 40                     # baseline solved in ffmpeg as HOOK_Y-text_h
+CREDIT_Y = FG_TOP + FG_H + 40            # 1349
+HOOK_SIZE, CREDIT_SIZE = 68, 44
+HOOK_WRAP = 18                           # characters per line at HOOK_SIZE
+
+PRESET = os.environ.get("X264_PRESET", "medium")
+FONT = (r"C\:/Windows/Fonts/arialbd.ttf" if os.name == "nt"
+        else "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf")
+TEXT_MODEL = "openai-fast"  # Pollinations free text model — no API key
+
+
+# --------------------------------------------------------------------------- #
+# helpers (same shape as the other shorts-* channels)
+# --------------------------------------------------------------------------- #
+def log(msg):
+    print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def run(cmd, cwd=None):
+    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if p.returncode != 0:
+        raise RuntimeError(
+            f"command failed ({p.returncode}): {' '.join(map(str, cmd))}\n"
+            f"STDERR:\n{p.stderr[-2000:]}"
+        )
+    return p
+
+
+def load_json(path, default):
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return default
+
+
+def save_json(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def cleanup_runs(days=KEEP_RUNS_DAYS):
+    if not os.path.isdir(RUNS_DIR):
+        return
+    cutoff = time.time() - days * 86400
+    for name in os.listdir(RUNS_DIR):
+        path = os.path.join(RUNS_DIR, name)
+        try:
+            if os.path.isdir(path) and os.path.getmtime(path) < cutoff:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
+
+
+_LOCK_OWNED = False
+
+
+def acquire_lock(stale_minutes=45):
+    global _LOCK_OWNED
+    try:
+        if os.path.exists(LOCK_FILE):
+            if time.time() - os.path.getmtime(LOCK_FILE) < stale_minutes * 60:
+                log("Another run is active — skipping this one.")
+                return False
+            log("Removing stale lock from a crashed run.")
+            os.remove(LOCK_FILE)
+        with open(LOCK_FILE, "x", encoding="utf-8") as f:
+            f.write(f"{os.getpid()} {dt.datetime.now().isoformat()}\n")
+        _LOCK_OWNED = True
+        return True
+    except (FileExistsError, OSError):
+        return False
+
+
+def release_lock():
+    global _LOCK_OWNED
+    if _LOCK_OWNED:
+        try:
+            os.remove(LOCK_FILE)
+        except OSError:
+            pass
+        _LOCK_OWNED = False
+
+
+def clear_flag(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _slug(text):
+    return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")[:40] or "clip"
+
+
+# --------------------------------------------------------------------------- #
+# copy: hook + metadata
+# --------------------------------------------------------------------------- #
+def _ask_json(prompt):
+    """One GET to Pollinations' free text model; returns a parsed JSON dict."""
+    url = (f"https://text.pollinations.ai/{urllib.parse.quote(prompt)}"
+           f"?model={TEXT_MODEL}&seed={random.randint(1, 10_000_000)}&json=true")
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=90) as r:
+        text = r.read().decode("utf-8", "replace").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text).rsplit("```", 1)[0]
+    a, b = text.find("{"), text.rfind("}")
+    if a == -1 or b == -1:
+        raise ValueError("no JSON object in response")
+    return json.loads(text[a:b + 1])
+
+
+def _clean(text, limit):
+    """Strip the emote spam and punctuation noise typical of Twitch titles."""
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    text = re.sub(r"[^\w\s'!?.,&:-]", "", text)
+    return text[:limit].strip(" -:,")
+
+
+def write_copy(clip):
+    """Hook line for the video, plus title/description/tags for YouTube.
+
+    The free text model rambles on complex prompts, so we ask it for two short
+    strings only and derive everything else locally. Falls back to the clip's
+    own title, which is always present.
+    """
+    streamer = clip["broadcaster_name"]
+    game = clip.get("game_name", "Twitch")
+    original = _clean(clip.get("title"), 90)
+
+    hook, title = "", ""
+    try:
+        got = _ask_json(
+            "You write YouTube Shorts copy. A Twitch clip: streamer "
+            f"'{streamer}', game '{game}', clip title '{original}'. "
+            'Reply ONLY as {"hook": "...", "title": "..."} where hook is a '
+            "punchy 3-6 word on-screen teaser in plain words, and title is a "
+            "curiosity-driven YouTube title under 70 characters. No emojis, "
+            "no hashtags, no quotes inside the strings."
+        )
+        hook = _clean(got.get("hook"), 60)
+        title = _clean(got.get("title"), 70)
+    except Exception as e:  # noqa: BLE001
+        log(f"  copy model failed ({e}); falling back to the clip title.")
+
+    hook = hook or original or f"{streamer} moment"
+    title = title or original or f"{streamer} - {game}"
+    if "#shorts" not in title.lower():
+        title = f"{title[:60]} #shorts"
+
+    description = (
+        f"{original}\n\n"
+        f"{streamer} playing {game}\n"
+        f"Original clip: {clip['url']}\n"
+        f"Watch {streamer} live: https://twitch.tv/{streamer}\n\n"
+        "All credit to the original streamer. Streamers: contact us and the "
+        "video comes down."
+    )
+    tags = [t for t in [game, streamer, "twitch", "twitch clips", "gaming",
+                        "shorts", "funny moments"] if t]
+    return {"hook": hook, "title": title, "description": description,
+            "tags": tags, "credit": f"@{streamer}"}
+
+
+# --------------------------------------------------------------------------- #
+# fetch + render
+# --------------------------------------------------------------------------- #
+def download_clip(url, out_path):
+    run([sys.executable, "-m", "yt_dlp", "--no-playlist", "--quiet",
+         "-f", "mp4/best", "-o", out_path, url])
+    if not os.path.exists(out_path) or os.path.getsize(out_path) < 10_000:
+        raise RuntimeError(f"download produced nothing usable for {url}")
+
+
+def _drawtext(textfile, size, y):
+    return (f"drawtext=fontfile='{FONT}':textfile='{textfile}':"
+            f"fontcolor=white:fontsize={size}:borderw=6:bordercolor=black:"
+            f"line_spacing=10:x=(w-text_w)/2:y={y}")
+
+
+def render(src, run_dir, copy, out_name="short.mp4"):
+    """One ffmpeg pass: blurred 9:16 backdrop, clip centered, hook + credit.
+
+    Text comes from files rather than inline strings so drawtext's escaping
+    never has to survive a shell round-trip, and ffmpeg runs with cwd set to
+    the run folder so those paths stay relative (no Windows drive colons).
+    """
+    with open(os.path.join(run_dir, "hook.txt"), "w", encoding="utf-8") as f:
+        f.write(textwrap.fill(copy["hook"].upper(), HOOK_WRAP))
+    with open(os.path.join(run_dir, "credit.txt"), "w", encoding="utf-8") as f:
+        f.write(copy["credit"])
+
+    vf = (
+        f"[0:v]split=2[bg][fg];"
+        f"[bg]scale={W}:{H}:force_original_aspect_ratio=increase,"
+        f"crop={W}:{H},boxblur=40:2[bgb];"
+        f"[fg]scale={FG_W}:{FG_H}:force_original_aspect_ratio=decrease[fgs];"
+        f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2[base];"
+        f"[base]{_drawtext('hook.txt', HOOK_SIZE, f'{HOOK_Y}-text_h')},"
+        f"{_drawtext('credit.txt', CREDIT_SIZE, CREDIT_Y)}[v]"
+    )
+    run(["ffmpeg", "-y", "-i", os.path.basename(src),
+         "-filter_complex", vf, "-map", "[v]", "-map", "0:a?",
+         "-r", str(FPS), "-c:v", "libx264", "-preset", PRESET, "-crf", "20",
+         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+         "-movflags", "+faststart", out_name], cwd=run_dir)
+    return os.path.join(run_dir, out_name)
+
+
+# --------------------------------------------------------------------------- #
+# upload + bookkeeping
+# --------------------------------------------------------------------------- #
+def upload(video_path, copy, privacy, publish_at=None):
+    cmd = [sys.executable, os.path.join(PROJECT_ROOT, "youtube_upload.py"),
+           video_path,
+           "--title", copy["title"],
+           "--description", copy["description"],
+           "--tags", ",".join(copy["tags"]),
+           "--privacy", privacy,
+           "--category", "20"]  # 20 = Gaming
+    if publish_at:
+        cmd += ["--publish-at", publish_at]
+    p = subprocess.run(cmd, cwd=PROJECT_ROOT, capture_output=True, text=True)
+    out = (p.stdout or "") + (p.stderr or "")
+    if p.returncode != 0:
+        low = out.lower()
+        if "uploadlimitexceeded" in low or "exceeded the number of videos" in low:
+            raise RuntimeError(
+                "DAILY UPLOAD LIMIT reached (YouTube caps uploads per 24h, "
+                "stricter for new channels). The clip stays unspent and a later "
+                "run retries.")
+        if any(k in low for k in ("invalid_grant", "refresherror", "expired",
+                                  "insufficient", "token has been expired",
+                                  "re-run: python youtube_authorize")):
+            with open(TOKEN_EXPIRED_FLAG, "w", encoding="utf-8") as f:
+                f.write(dt.datetime.now().isoformat() + "\n")
+                f.write("YouTube token expired. Run: python youtube_authorize.py\n")
+            raise RuntimeError(f"TOKEN EXPIRED — run youtube_authorize.py.\n{out[-1500:]}")
+        raise RuntimeError(f"upload failed:\n{out[-1500:]}")
+    clear_flag(TOKEN_EXPIRED_FLAG)
+    url = ""
+    for line in out.splitlines():
+        if "youtu.be/" in line or "youtube.com/watch" in line:
+            url = line.strip().split()[-1]
+    return url or "(uploaded; url not parsed)"
+
+
+def append_history(clip_id, url, privacy):
+    new = not os.path.exists(HISTORY_CSV)
+    with open(HISTORY_CSV, "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(["date", "clip_id", "privacy", "url"])
+        w.writerow([dt.datetime.now(TZ).date().isoformat(), clip_id, privacy, url])
+
+
+def slots_filled_today():
+    if not os.path.exists(HISTORY_CSV):
+        return 0
+    today = dt.datetime.now(TZ).date().isoformat()
+    n = 0
+    with open(HISTORY_CSV, newline="", encoding="utf-8") as f:
+        for row in csv.reader(f):
+            if len(row) >= 3 and row[0] == today and row[2] in ("public", "scheduled"):
+                n += 1
+    return n
+
+
+def slot_publish_time(idx):
+    h, m = PUBLISH_SLOTS[idx]
+    today = dt.datetime.now(TZ).date()
+    when = dt.datetime(today.year, today.month, today.day, h, m, tzinfo=TZ)
+    if when <= dt.datetime.now(TZ) + dt.timedelta(minutes=2):
+        return None
+    return when.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# --------------------------------------------------------------------------- #
+# produce one short
+# --------------------------------------------------------------------------- #
+def produce_one(candidates, state, args, publish_at):
+    """Take the best unspent candidate and ship it.
+
+    A clip that fails to download or render is marked spent and we drop to the
+    next one — the pool is hundreds deep, so one bad clip never costs a slot.
+    """
+    while candidates:
+        clip = candidates.pop(0)
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        run_dir = os.path.join(RUNS_DIR, f"{stamp}-{_slug(clip['broadcaster_name'])}")
+        os.makedirs(run_dir, exist_ok=True)
+        log(f"Clip: {clip['broadcaster_name']} / {clip.get('game_name')} "
+            f"({int(clip['view_count']):,} views, {float(clip['duration']):.0f}s)")
+        try:
+            src = os.path.join(run_dir, "source.mp4")
+            download_clip(clip["url"], src)
+            copy = write_copy(clip)
+            log(f"  hook: {copy['hook']}")
+            video = render(src, run_dir, copy)
+        except Exception as e:  # noqa: BLE001
+            log(f"  clip failed ({e}); marking spent and taking the next one.")
+            state.setdefault("seen", []).append(clip["id"])
+            save_json(STATE_FILE, state)
+            continue
+
+        state.setdefault("seen", []).append(clip["id"])
+        save_json(STATE_FILE, state)
+
+        if args.no_upload:
+            log(f"Built (upload skipped): {video}")
+            return video
+
+        privacy = "private" if publish_at else args.privacy
+        url = upload(video, copy, privacy, publish_at)
+        append_history(clip["id"], url, "scheduled" if publish_at else privacy)
+        log(f"Posted: {url}")
+        return video
+
+    raise RuntimeError("no usable candidates left in the pool")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--privacy", default="public",
+                    choices=["public", "unlisted", "private"])
+    ap.add_argument("--no-upload", action="store_true")
+    ap.add_argument("--fill-day", action="store_true",
+                    help="build every remaining slot today and hand them to "
+                         "YouTube's scheduler")
+    args = ap.parse_args()
+
+    os.makedirs(RUNS_DIR, exist_ok=True)
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    if not acquire_lock():
+        return
+    try:
+        cleanup_runs()
+        state = load_json(STATE_FILE, {"seen": []})
+        log("Discovering clips...")
+        candidates = twitch.discover(seen=state.get("seen", []))
+        log(f"{len(candidates)} candidates.")
+        if not candidates:
+            log("Nothing new passed the filter — a later run will retry.")
+            return
+
+        if not args.fill_day:
+            produce_one(candidates, state, args, publish_at=None)
+            return
+
+        total = len(PUBLISH_SLOTS)
+        done = slots_filled_today()
+        if done >= total:
+            log(f"All {total} slots already scheduled today; nothing to do.")
+            return
+        log(f"Filling {total - done} of {total} slots...")
+        for idx in range(done, total):
+            publish_at = slot_publish_time(idx)
+            log(f"--- slot {idx + 1}/{total} -> "
+                f"{publish_at or 'now (slot already passed)'}")
+            try:
+                produce_one(candidates, state, args, publish_at=publish_at)
+            except Exception as e:  # noqa: BLE001
+                log(f"slot {idx + 1} failed ({e}); a catch-up run will retry.")
+    finally:
+        release_lock()
+
+
+if __name__ == "__main__":
+    main()

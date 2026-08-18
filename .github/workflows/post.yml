@@ -1,0 +1,68 @@
+name: post
+on:
+  schedule:
+    # ONE generation run builds all of the day's clips and hands them to
+    # YouTube's own scheduler (publishAt), so GitHub cron only has to fire once.
+    # Two later checks catch up if the morning run was dropped. Times are UTC.
+    - cron: "0 14 * * *"    # ~10:00a EDT — main generation (before the 12p slot)
+    - cron: "30 17 * * *"   # ~1:30p EDT — catch-up check
+    - cron: "30 21 * * *"   # ~5:30p EDT — catch-up check
+  workflow_dispatch:
+    inputs:
+      fill_day:
+        description: "schedule the whole day (true) or post one now (false)"
+        default: "true"
+      privacy:
+        description: "one-off privacy when fill_day=false"
+        default: "public"
+
+concurrency:
+  group: post
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install ffmpeg + fonts
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-liberation
+      - name: install python deps
+        run: pip install -q -r requirements.txt
+      - name: write secrets
+        env:
+          CLIENT_SECRET_JSON: ${{ secrets.CLIENT_SECRET_JSON }}
+          TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
+        run: |
+          printf '%s' "$CLIENT_SECRET_JSON" > client_secret.json
+          printf '%s' "$TOKEN_JSON" > token.json
+      - name: build and schedule the day
+        env:
+          TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
+          TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+          X264_PRESET: ultrafast
+          PYTHONIOENCODING: utf-8
+        run: |
+          if [ "${{ github.event.inputs.fill_day }}" = "false" ]; then
+            python make_clip.py --privacy "${{ github.event.inputs.privacy || 'public' }}"
+          else
+            python make_clip.py --fill-day
+          fi
+      - name: persist state
+        if: always()
+        run: |
+          git config user.name "autopost"
+          git config user.email "actions@users.noreply.github.com"
+          git add state.json logs/history.csv 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "state: $(date -u +%Y-%m-%d\ %H:%M) UTC [skip ci]"
+            git pull --rebase
+            git push
+          fi
