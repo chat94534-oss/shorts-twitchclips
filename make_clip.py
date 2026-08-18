@@ -526,6 +526,9 @@ def main():
     ap.add_argument("--fill-day", action="store_true",
                     help="fill today's unfilled slots and hand them to "
                          "YouTube's scheduler")
+    ap.add_argument("--streamer", metavar="LOGIN",
+                    help="pull from one streamer's clips instead of the top "
+                         "games pool (e.g. --streamer ishowspeed)")
     ap.add_argument("--max", type=int, default=BATCH_SIZE, metavar="N",
                     help=f"most slots to fill in one run (default {BATCH_SIZE}); "
                          "0 means no limit")
@@ -541,8 +544,12 @@ def main():
         # Seed from the upload log as well as state.json, so losing one file
         # cannot resurrect an already-posted clip.
         spent = set(state.get("seen", [])) | clips_ever_posted()
-        log("Discovering clips...")
-        candidates = twitch.discover(seen=spent)
+        if args.streamer:
+            log(f"Discovering clips from {args.streamer}...")
+            candidates = twitch.discover_streamer(args.streamer, seen=spent)
+        else:
+            log("Discovering clips...")
+            candidates = twitch.discover(seen=spent)
         log(f"{len(candidates)} candidates ({len(spent)} clips already spent).")
         if not candidates:
             log("Nothing new passed the filter — a later run will retry.")

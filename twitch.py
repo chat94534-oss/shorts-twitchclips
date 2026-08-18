@@ -137,6 +137,54 @@ def keep(clip, seen):
     return int(clip.get("view_count") or 0) >= MIN_VIEWS
 
 
+def user_id(login, cid, token):
+    """Resolve a Twitch login name to its numeric id."""
+    data = _helix("users", {"login": login.lstrip("@").lower()},
+                  cid, token)["data"]
+    if not data:
+        raise SystemExit(f"No such Twitch user: {login}")
+    return data[0]["id"], data[0]["display_name"]
+
+
+def game_names(game_ids, cid, token):
+    """Map game ids to names. Clips fetched by broadcaster carry only the id."""
+    ids = [g for g in {gid for gid in game_ids if gid}][:100]
+    if not ids:
+        return {}
+    params = [("id", g) for g in ids]
+    url = ("https://api.twitch.tv/helix/games?"
+           + urllib.parse.urlencode(params))
+    data = _request(url, headers={"Client-ID": cid,
+                                  "Authorization": f"Bearer {token}"})["data"]
+    return {g["id"]: g["name"] for g in data}
+
+
+def discover_streamer(login, seen=(), hours=WINDOW_HOURS):
+    """One streamer's top clips for the window, filtered and ranked like the
+    main pool. Uses broadcaster_id rather than game_id — the other half of what
+    /helix/clips accepts."""
+    cid, secret = credentials()
+    token = app_token(cid, secret)
+    uid, display = user_id(login, cid, token)
+    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
+
+    raw = _helix("clips", {
+        "broadcaster_id": uid,
+        "started_at": since.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "first": 100,
+    }, cid, token)["data"]
+
+    seen = set(seen)
+    pool = [c for c in raw if keep(c, seen)]
+    names = game_names([c.get("game_id") for c in pool], cid, token)
+    for c in pool:
+        c["game_name"] = names.get(c.get("game_id"), "Twitch")
+    pool.sort(key=lambda c: int(c.get("view_count") or 0), reverse=True)
+    print(f"{display}: {len(pool)} usable clips of {len(raw)} in the window",
+          file=sys.stderr)
+    return pool
+
+
 def discover(seen=(), hours=WINDOW_HOURS, games=TOP_GAMES):
     """Return candidate clips, most-viewed first, already filtered and deduped."""
     cid, secret = credentials()
