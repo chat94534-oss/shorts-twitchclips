@@ -1,13 +1,14 @@
-# Moments to Remember — Twitch clip autopost
+# twitch-clip-autopost
 
-Fully automated YouTube Shorts channel built from Twitch's top clips. GitHub
+Unattended YouTube Shorts pipeline built from Twitch's top clips. GitHub
 Actions finds the clips, cuts them to 9:16, and posts them — nothing runs on a
 local machine.
 
-Twitch Helix (top games → top clips of the last 24h) → filter and rank by views
-→ `yt-dlp` → Pollinations writes the hook and title → ffmpeg (blurred 9:16
-backdrop, clip centered, burned hook + streamer credit) → YouTube upload. The
-workflow commits spent clip ids back to the repo after each run.
+Twitch Helix (top games → their top clips of the last 7 days) → filter and rank
+by views → `yt-dlp` → hook and title derived from the clip's own metadata →
+ffmpeg (blurred 9:16 backdrop, clip centered, burned hook + streamer credit) →
+YouTube upload. The workflow commits spent clip ids back to the repo after each
+run.
 
 - **Schedule (EDT):** 12 PM, 3 PM, 6 PM, 9 PM — see `.github/workflows/post.yml`.
   Crons are UTC: **in November (DST ends) bump each cron hour +1** or posts shift
