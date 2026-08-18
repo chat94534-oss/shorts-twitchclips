@@ -256,12 +256,13 @@ def write_copy(clip):
             hook = GENERIC_HOOKS[idx]
         title = original or f"{streamer} - {game}"
     hook = hook[:46]
+    headline = title
     title = _final_title(title, streamer)
 
     # Keywords first, links last: YouTube reads the opening lines for topic,
     # and the first three hashtags render above the title.
     description = (
-        f"{original}\n\n"
+        f"{headline}\n\n"
         f"{streamer} playing {game} on Twitch. Best Twitch clips, funny "
         f"moments and stream highlights, posted daily.\n\n"
         f"{_hashtags(game, streamer)}\n\n"
