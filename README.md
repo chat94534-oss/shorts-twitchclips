@@ -17,7 +17,10 @@ run.
   an hour early.
 - **Secrets (repo settings):** `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET`,
   `CLIENT_SECRET_JSON`, `TOKEN_JSON`.
-- **Manual run:** Actions → post → Run workflow (choose privacy for tests).
+- **Batches:** six scheduled runs a day build 3 slots each — 18 of capacity for
+  11 slots. A failed run costs nothing: the next batch measures the gap from
+  videos actually posted and makes it up.
+- **Manual run:** Actions → post → Run workflow (privacy, and `max` slots).
 
 ## Local runs
 

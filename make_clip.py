@@ -3,11 +3,14 @@
 
     twitch.discover()  ->  yt-dlp  ->  ffmpeg 9:16  ->  youtube_upload.py
 
-One run builds every remaining slot for the day and hands each video to
-YouTube's own scheduler via publishAt, so GitHub's flaky cron only has to
-fire once. State (which clips are spent) is committed back by the workflow.
+Runs in batches: each scheduled run fills up to BATCH_SIZE of the day's unfilled
+slots and hands each video to YouTube's scheduler via publishAt. Six runs a day
+at 3 each covers 11 slots with room to spare, so a run that fails is simply
+absorbed by the next one — the gap is measured from videos actually posted, not
+from whether a workflow run went green. State is committed back by the workflow.
 
-    python make_clip.py --fill-day          # the CI path
+    python make_clip.py --fill-day          # the CI path (3 slots)
+    python make_clip.py --fill-day --max 0  # everything still missing today
     python make_clip.py --no-upload         # render one locally, upload nothing
     python make_clip.py --privacy unlisted  # one video, now, unlisted
 """
@@ -54,6 +57,11 @@ PUBLISH_SLOTS = [
     (13, 0), (15, 0), (17, 0),             # afternoon
     (19, 0), (20, 0), (21, 0), (22, 0), (23, 0),  # night
 ]
+# Slots built per run. Eleven uploads in one burst is the shape YouTube's spam
+# heuristics look at, and a single long run is a single point of failure. Six
+# scheduled runs a day at 3 each gives 18 of capacity for 11 slots, so a failed
+# run is absorbed by the next one rather than costing the day.
+BATCH_SIZE = 3
 
 W, H, FPS = 1080, 1920, 30
 # The clip sits in a fixed box, scaled to fit (never distorted, never cropped).
@@ -434,6 +442,24 @@ def slots_filled_today():
     return n
 
 
+def clips_ever_posted():
+    """Every clip id in the upload log — the second line of defence on repeats.
+
+    state.json is the primary record, but it lives in one file that a failed
+    persist can lose. That is exactly how the same xQc clip went up twice. The
+    history log is written on the same commit, so seeding from both means a
+    clip has to vanish from two places before it can be posted again.
+    """
+    if not os.path.exists(HISTORY_CSV):
+        return set()
+    ids = set()
+    with open(HISTORY_CSV, newline="", encoding="utf-8") as f:
+        for row in csv.reader(f):
+            if len(row) >= 2 and row[1] and row[1] != "clip_id":
+                ids.add(row[1])
+    return ids
+
+
 def slot_publish_time(idx):
     h, m = PUBLISH_SLOTS[idx]
     today = dt.datetime.now(TZ).date()
@@ -498,8 +524,11 @@ def main():
                          "(centre-cropped, fills the frame) for gameplay, blur "
                          "(letterboxed) for chat/IRL categories")
     ap.add_argument("--fill-day", action="store_true",
-                    help="build every remaining slot today and hand them to "
+                    help="fill today's unfilled slots and hand them to "
                          "YouTube's scheduler")
+    ap.add_argument("--max", type=int, default=BATCH_SIZE, metavar="N",
+                    help=f"most slots to fill in one run (default {BATCH_SIZE}); "
+                         "0 means no limit")
     args = ap.parse_args()
 
     os.makedirs(RUNS_DIR, exist_ok=True)
@@ -509,9 +538,12 @@ def main():
     try:
         cleanup_runs()
         state = load_json(STATE_FILE, {"seen": []})
+        # Seed from the upload log as well as state.json, so losing one file
+        # cannot resurrect an already-posted clip.
+        spent = set(state.get("seen", [])) | clips_ever_posted()
         log("Discovering clips...")
-        candidates = twitch.discover(seen=state.get("seen", []))
-        log(f"{len(candidates)} candidates.")
+        candidates = twitch.discover(seen=spent)
+        log(f"{len(candidates)} candidates ({len(spent)} clips already spent).")
         if not candidates:
             log("Nothing new passed the filter — a later run will retry.")
             return
@@ -523,17 +555,24 @@ def main():
         total = len(PUBLISH_SLOTS)
         done = slots_filled_today()
         if done >= total:
-            log(f"All {total} slots already scheduled today; nothing to do.")
+            log(f"All {total} slots already filled today; nothing to do.")
             return
-        log(f"Filling {total - done} of {total} slots...")
-        for idx in range(done, total):
+
+        # Whatever is missing gets picked up here, whether it was never built
+        # or a previous run died mid-slot — the gap is measured from videos
+        # actually posted, not from whether a workflow run went green.
+        missing = total - done
+        want = missing if args.max <= 0 else min(args.max, missing)
+        log(f"{done}/{total} slots filled today; building {want} now"
+            f"{' (catching up)' if done and missing > args.max > 0 else ''}.")
+        for idx in range(done, done + want):
             publish_at = slot_publish_time(idx)
             log(f"--- slot {idx + 1}/{total} -> "
                 f"{publish_at or 'now (slot already passed)'}")
             try:
                 produce_one(candidates, state, args, publish_at=publish_at)
             except Exception as e:  # noqa: BLE001
-                log(f"slot {idx + 1} failed ({e}); a catch-up run will retry.")
+                log(f"slot {idx + 1} failed ({e}); a later batch will retry it.")
     finally:
         release_lock()
 

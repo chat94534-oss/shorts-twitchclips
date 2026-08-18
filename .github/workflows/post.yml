@@ -4,9 +4,15 @@ on:
     # ONE generation run builds all of the day's clips and hands them to
     # YouTube's own scheduler (publishAt), so GitHub cron only has to fire once.
     # Two later checks catch up if the morning run was dropped. Times are UTC.
-    - cron: "0 9 * * *"     # ~5:00a EDT — main generation (before the 7a slot)
-    - cron: "0 16 * * *"    # ~12:00p EDT — catch-up check
-    - cron: "0 20 * * *"    # ~4:00p EDT — catch-up check
+    # Six batches a day, 3 slots each = 18 of capacity for 11 slots. Any run
+    # that fails is absorbed by the next batch, which measures the gap from
+    # videos actually posted rather than from run status. Times are UTC.
+    - cron: "0 9 * * *"     # ~5:00a EDT
+    - cron: "0 12 * * *"    # ~8:00a EDT
+    - cron: "0 15 * * *"    # ~11:00a EDT
+    - cron: "0 18 * * *"    # ~2:00p EDT
+    - cron: "0 21 * * *"    # ~5:00p EDT
+    - cron: "0 0 * * *"     # ~8:00p EDT
   workflow_dispatch:
     inputs:
       fill_day:
@@ -15,6 +21,9 @@ on:
       privacy:
         description: "one-off privacy when fill_day=false"
         default: "public"
+      max:
+        description: "most slots to fill in this run (0 = all remaining)"
+        default: "3"
 
 concurrency:
   group: post
@@ -70,7 +79,7 @@ jobs:
           if [ "${{ github.event.inputs.fill_day }}" = "false" ]; then
             python make_clip.py --privacy "${{ github.event.inputs.privacy || 'public' }}"
           else
-            python make_clip.py --fill-day
+            python make_clip.py --fill-day --max "${{ github.event.inputs.max || '3' }}"
           fi
       - name: persist state
         if: always()
