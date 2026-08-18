@@ -54,8 +54,15 @@ FG_W, FG_H = 1242, 698
 FG_TOP = (H - FG_H) // 2                 # 611
 HOOK_Y = FG_TOP - 40                     # baseline solved in ffmpeg as HOOK_Y-text_h
 CREDIT_Y = FG_TOP + FG_H + 40            # 1349
-HOOK_SIZE, CREDIT_SIZE = 68, 44
-HOOK_WRAP = 18                           # characters per line at HOOK_SIZE
+CREDIT_SIZE = 44
+HOOK_SIZES = [96, 84, 72, 64]            # tried largest-first until it fits
+HOOK_MAX_CHARS = 30                      # a hook is a glance, not a sentence
+# Words that read as broken when a trim lands on them.
+HOOK_TAIL_STOPWORDS = {
+    "THE", "A", "AN", "AND", "OR", "TO", "AT", "OF", "IN", "ON", "FOR",
+    "WITH", "BUT", "IS", "WAS", "HIS", "HER", "THEIR", "MY",
+}
+STYLE = "fill"                           # "fill" (full-frame) or "blur" (letterboxed)
 
 PRESET = os.environ.get("X264_PRESET", "medium")
 FONT = (r"C\:/Windows/Fonts/arialbd.ttf" if os.name == "nt"
@@ -196,9 +203,7 @@ def write_copy(clip):
         f"{original}\n\n"
         f"{streamer} playing {game}\n"
         f"Original clip: {clip['url']}\n"
-        f"Watch {streamer} live: https://twitch.tv/{streamer}\n\n"
-        "All credit to the original streamer. Streamers: contact us and the "
-        "video comes down."
+        f"Watch {streamer} live: https://twitch.tv/{streamer}"
     )
     tags = [t for t in [game, streamer, "twitch", "twitch clips", "gaming",
                         "shorts", "funny moments"] if t]
@@ -216,37 +221,102 @@ def download_clip(url, out_path):
         raise RuntimeError(f"download produced nothing usable for {url}")
 
 
-def _drawtext(textfile, size, y):
+def _drawtext(textfile, size, y, plate=False):
+    """One drawtext filter. plate=True adds a dark slab behind the text, which
+    is what keeps it readable when it sits directly on top of footage."""
+    box = ("box=1:boxcolor=black@0.5:boxborderw=16:" if plate else "")
     return (f"drawtext=fontfile='{FONT}':textfile='{textfile}':"
             f"fontcolor=white:fontsize={size}:borderw=6:bordercolor=black:"
-            f"line_spacing=10:x=(w-text_w)/2:y={y}")
+            f"{box}line_spacing=0:x=(w-text_w)/2:y={y}")
 
 
-def render(src, run_dir, copy, out_name="short.mp4"):
-    """One ffmpeg pass: blurred 9:16 backdrop, clip centered, hook + credit.
+def _blur_chain(hook_size):
+    """Clip letterboxed into a blurred copy of itself. Shows the whole 16:9
+    frame, but the video only occupies ~36% of the screen height."""
+    return (
+        f"[0:v]split=2[bg][fg];"
+        f"[bg]scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop={W}:{H},boxblur=40:2[bgb];"
+        f"[fg]scale={FG_W}:{FG_H}:force_original_aspect_ratio=decrease:flags=lanczos[fgs];"
+        f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2[base];"
+        f"[base]{_drawtext('hook.txt', hook_size, f'{HOOK_Y}-text_h')},"
+        f"{_drawtext('credit.txt', CREDIT_SIZE, CREDIT_Y)}[v]"
+    )
+
+
+def _fill_chain(hook_size):
+    """Clip scaled to cover the whole 9:16 frame, centre-cropped.
+
+    Fills the screen, which is what reads as 'a real Short' rather than a
+    reposted strip. The cost is real: a 16:9 source keeps only its middle ~32%
+    horizontally, so action at the frame edges is gone. Text sits on the
+    footage, hence the plate behind it.
+    """
+    return (
+        f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop={W}:{H},"
+        f"{_drawtext('hook.txt', hook_size, '200', plate=True)},"
+        f"{_drawtext('credit.txt', CREDIT_SIZE, H - 260, plate=True)}[v]"
+    )
+
+
+def fit_hook(text, max_lines=2):
+    """Trim and size a hook so it lands in at most two lines of large type.
+
+    A hook is a glance, not a sentence. Three lines of shouting reads as a
+    wall of text and buries the footage, so anything long is cut at a word
+    boundary and the type size is picked to fit what remains. Returns
+    (wrapped_text, fontsize).
+    """
+    words = text.upper().split()
+    trimmed = ""
+    for w in words:
+        candidate = f"{trimmed} {w}".strip()
+        if len(candidate) > HOOK_MAX_CHARS:
+            break
+        trimmed = candidate
+    trimmed = trimmed or text.upper()[:HOOK_MAX_CHARS]
+
+    # Trimming mid-phrase leaves danglers like "...HIT THE". Drop them.
+    parts = trimmed.split()
+    while len(parts) > 1 and parts[-1].strip(",.-") in HOOK_TAIL_STOPWORDS:
+        parts.pop()
+    trimmed = " ".join(parts).strip(" ,.-")
+
+    for size in HOOK_SIZES:
+        # Arial Bold averages ~0.58em per character; 1000px is the usable width.
+        per_line = max(8, int(1000 / (size * 0.58)))
+        wrapped = textwrap.fill(trimmed, per_line)
+        if wrapped.count("\n") + 1 <= max_lines:
+            return wrapped, size
+    per_line = max(8, int(1000 / (HOOK_SIZES[-1] * 0.58)))
+    return textwrap.fill(trimmed, per_line), HOOK_SIZES[-1]
+
+
+def render(src, run_dir, copy, out_name="short.mp4", style=None):
+    """One ffmpeg pass to a finished 1080x1920 Short.
 
     Text comes from files rather than inline strings so drawtext's escaping
     never has to survive a shell round-trip, and ffmpeg runs with cwd set to
     the run folder so those paths stay relative (no Windows drive colons).
     """
-    with open(os.path.join(run_dir, "hook.txt"), "w", encoding="utf-8") as f:
-        f.write(textwrap.fill(copy["hook"].upper(), HOOK_WRAP))
-    with open(os.path.join(run_dir, "credit.txt"), "w", encoding="utf-8") as f:
+    style = style or STYLE
+    hook_text, hook_size = fit_hook(copy["hook"])
+    # newline="\n": on Windows, text mode would write CRLF and drawtext renders
+    # the stray CR as a glyph, opening a phantom gap between wrapped lines.
+    with open(os.path.join(run_dir, "hook.txt"), "w", encoding="utf-8",
+              newline="\n") as f:
+        f.write(hook_text)
+    with open(os.path.join(run_dir, "credit.txt"), "w", encoding="utf-8",
+              newline="\n") as f:
         f.write(copy["credit"])
 
-    vf = (
-        f"[0:v]split=2[bg][fg];"
-        f"[bg]scale={W}:{H}:force_original_aspect_ratio=increase,"
-        f"crop={W}:{H},boxblur=40:2[bgb];"
-        f"[fg]scale={FG_W}:{FG_H}:force_original_aspect_ratio=decrease[fgs];"
-        f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2[base];"
-        f"[base]{_drawtext('hook.txt', HOOK_SIZE, f'{HOOK_Y}-text_h')},"
-        f"{_drawtext('credit.txt', CREDIT_SIZE, CREDIT_Y)}[v]"
-    )
+    vf = (_fill_chain(hook_size) if style == "fill"
+          else _blur_chain(hook_size))
     run(["ffmpeg", "-y", "-i", os.path.basename(src),
          "-filter_complex", vf, "-map", "[v]", "-map", "0:a?",
-         "-r", str(FPS), "-c:v", "libx264", "-preset", PRESET, "-crf", "20",
-         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+         "-r", str(FPS), "-c:v", "libx264", "-preset", PRESET, "-crf", "18",
+         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
          "-movflags", "+faststart", out_name], cwd=run_dir)
     return os.path.join(run_dir, out_name)
 
@@ -340,7 +410,7 @@ def produce_one(candidates, state, args, publish_at):
             download_clip(clip["url"], src)
             copy = write_copy(clip)
             log(f"  hook: {copy['hook']}")
-            video = render(src, run_dir, copy)
+            video = render(src, run_dir, copy, style=args.style)
         except Exception as e:  # noqa: BLE001
             log(f"  clip failed ({e}); marking spent and taking the next one.")
             state.setdefault("seen", []).append(clip["id"])
@@ -368,6 +438,9 @@ def main():
     ap.add_argument("--privacy", default="public",
                     choices=["public", "unlisted", "private"])
     ap.add_argument("--no-upload", action="store_true")
+    ap.add_argument("--style", default=STYLE, choices=["fill", "blur"],
+                    help="fill = clip covers the whole frame (centre-cropped); "
+                         "blur = whole 16:9 frame letterboxed into a blurred copy")
     ap.add_argument("--fill-day", action="store_true",
                     help="build every remaining slot today and hand them to "
                          "YouTube's scheduler")
