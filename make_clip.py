@@ -86,6 +86,9 @@ HOOK_HOLD = 3.0                          # seconds the hook and credit stay up
 HOOK_FADE = 0.5                          # seconds to fade them out
 # Split layout: facecam on top, gameplay below. 35/65 puts the face big enough
 # to read at thumbnail size while leaving the game the majority of the frame.
+# Two or three cams share that band as equal tiles. Past three the tiles are
+# too narrow to read a face in, so those clips get normal framing instead.
+MAX_CAMS = 3
 SPLIT_TOP_H = int(H * 0.35) // 2 * 2      # 672, kept even for libx264
 SPLIT_BOTTOM_H = H - SPLIT_TOP_H          # 1248
 STYLE = "auto"        # "auto" | "split" | "fill" (full-frame) | "blur" (letterboxed)
@@ -284,26 +287,42 @@ def _blur_chain(hook_size):
     )
 
 
-def _split_chain(hook_size, cam):
-    """Facecam stacked on top of the gameplay — the standard clip-channel look.
+def _split_chain(hook_size, cams):
+    """Facecam(s) stacked on top of the gameplay — the standard clip look.
 
-    cam is (x, y, w, h) in source pixels, from facecam.detect(). The cam fills
-    the top band and the gameplay the rest; the gameplay is centre-cropped, but
-    from a shorter box than full-frame fill, so it keeps ~49% of the width
-    instead of ~32%.
+    cams is a list of (x, y, w, h) boxes in source pixels, left to right. One
+    cam fills the top band; a co-stream's two or three share it as equal tiles,
+    so nobody gets cropped out of their own clip. Each tile is cover-cropped,
+    which keeps the middle of a webcam — where a face sits — and discards the
+    edges of the room.
+
+    The gameplay below is centre-cropped from a shorter box than full-frame
+    fill, so it keeps ~49% of the source width instead of ~32%.
     """
-    cx, cy, cw, ch = cam
-    return (
-        f"[0:v]split=2[cam][game];"
-        f"[cam]crop={cw}:{ch}:{cx}:{cy},"
-        f"scale={W}:{SPLIT_TOP_H}:force_original_aspect_ratio=increase:"
-        f"flags=lanczos,crop={W}:{SPLIT_TOP_H}[camf];"
+    n = len(cams)
+    tile_w = (W // n) // 2 * 2               # even, for libx264
+    labels = "".join(f"[c{i}]" for i in range(n))
+
+    parts = [f"[0:v]split={n + 1}{labels}[game];"]
+    for i, (cx, cy, cw, ch) in enumerate(cams):
+        # Last tile absorbs any rounding so the row is exactly W wide.
+        w = tile_w if i < n - 1 else W - tile_w * (n - 1)
+        parts.append(
+            f"[c{i}]crop={cw}:{ch}:{cx}:{cy},"
+            f"scale={w}:{SPLIT_TOP_H}:force_original_aspect_ratio=increase:"
+            f"flags=lanczos,crop={w}:{SPLIT_TOP_H}[t{i}];")
+    if n > 1:
+        parts.append("".join(f"[t{i}]" for i in range(n))
+                     + f"hstack=inputs={n}[camrow];")
+    else:
+        parts.append("[t0]null[camrow];")
+    parts.append(
         f"[game]scale={W}:{SPLIT_BOTTOM_H}:force_original_aspect_ratio=increase:"
         f"flags=lanczos,crop={W}:{SPLIT_BOTTOM_H}[gamef];"
-        f"[camf][gamef]vstack=2[base];"
+        f"[camrow][gamef]vstack=2[base];"
         f"[base]{_drawtext('credit.txt', CREDIT_SIZE, CREDIT_TOP_Y)},"
-        f"{_drawtext('hook.txt', hook_size, SPLIT_TOP_H + 40)}[v]"
-    )
+        f"{_drawtext('hook.txt', hook_size, SPLIT_TOP_H + 40)}[v]")
+    return "".join(parts)
 
 
 def _fill_chain(hook_size):
@@ -382,7 +401,7 @@ def fit_hook(text, max_lines=2):
     return textwrap.fill(trimmed, per_line), HOOK_SIZES[-1]
 
 
-def render(src, run_dir, copy, out_name="short.mp4", style=None, cam=None):
+def render(src, run_dir, copy, out_name="short.mp4", style=None, cams=None):
     """One ffmpeg pass to a finished 1080x1920 Short.
 
     Text comes from files rather than inline strings so drawtext's escaping
@@ -400,8 +419,8 @@ def render(src, run_dir, copy, out_name="short.mp4", style=None, cam=None):
               newline="\n") as f:
         f.write(copy["credit"])
 
-    if style == "split" and cam:
-        vf = _split_chain(hook_size, cam)
+    if style == "split" and cams:
+        vf = _split_chain(hook_size, cams)
     elif style == "fill":
         vf = _fill_chain(hook_size)
     else:
@@ -522,17 +541,20 @@ def produce_one(candidates, state, args, publish_at):
             copy = write_copy(clip)
             log(f"  hook: {copy['hook']}")
             style = args.style or style_for(clip)
-            cam = None
+            cams = None
             if style == "fill":
                 # Only gameplay: chat and IRL clips are letterboxed already, so
                 # the cam is on screen and there is nothing to look for.
-                cam = facecam.detect(src)
-                if cam:
-                    style = "split"
-                    log(f"  facecam at {cam} -> split layout")
+                found = facecam.detect_all(src)
+                if 1 <= len(found) <= MAX_CAMS:
+                    cams, style = found, "split"
+                    log(f"  {len(found)} facecam(s) {found} -> split layout")
+                elif len(found) > MAX_CAMS:
+                    log(f"  {len(found)} facecams — too many to tile, "
+                        "using full-frame")
                 else:
                     log("  no facecam found -> full-frame")
-            video = render(src, run_dir, copy, style=style, cam=cam)
+            video = render(src, run_dir, copy, style=style, cams=cams)
         except Exception as e:  # noqa: BLE001
             log(f"  clip failed ({e}); marking spent and taking the next one.")
             state.setdefault("seen", []).append(clip["id"])

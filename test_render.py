@@ -60,6 +60,17 @@ def main():
         out2 = make_clip.render(tall, work, copy, out_name="tall_short.mp4")
         assert probe_size(out2) == (make_clip.W, make_clip.H)
 
+        # The split chain builds a different filtergraph per cam count, and a
+        # tile-width rounding error only shows up as an ffmpeg failure, so walk
+        # every supported count against a 16:9 source.
+        boxes = [(40, 20, 400, 225), (840, 20, 400, 225), (440, 20, 400, 225)]
+        for n in range(1, make_clip.MAX_CAMS + 1):
+            out_n = make_clip.render(src, work, copy, out_name=f"split{n}.mp4",
+                                     style="split", cams=boxes[:n])
+            assert probe_size(out_n) == (make_clip.W, make_clip.H), \
+                f"{n}-cam split came out the wrong size"
+        print(f"split check: OK (1..{make_clip.MAX_CAMS} cams)")
+
         print(f"render check: OK  ({w}x{h}, {os.path.getsize(out):,} bytes)")
         print(f"sample kept at: {out}")
         shutil.copy(out, os.path.join(make_clip.HERE, "sample_short.mp4"))

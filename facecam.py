@@ -201,8 +201,46 @@ def _load_cv2():
     return cv2
 
 
+def detect_all(path):
+    """Every webcam overlay found, ordered left to right.
+
+    A co-stream carries two or three cams; they share the top band so nobody
+    gets cropped out. Past three the tiles are too narrow to read a face in, so
+    the caller falls back to normal framing.
+    """
+    try:
+        _load_cv2()
+    except ImportError:
+        return []
+    frames = _sample_frames(path)
+    if len(frames) < 3:
+        return []
+    faces = _face_anchors(frames, _cascade())
+    if not faces:
+        return []
+    fh, fw = frames[0].shape[:2]
+    edges = _persistent_edges(frames)
+    boxes = [b for b in (_cam_from_edges(edges, f, fw, fh) for f in faces) if b]
+    # Two faces inside one cam would otherwise yield near-identical boxes.
+    unique = []
+    for b in sorted(boxes, key=lambda b: b[2] * b[3], reverse=True):
+        if not any(_overlaps(b, u) for u in unique):
+            unique.append(b)
+    return sorted(unique, key=lambda b: b[0])
+
+
+def _overlaps(a, b, frac=0.5):
+    """True when two boxes cover much the same area — the same cam, twice."""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ix = max(0, min(ax + aw, bx + bw) - max(ax, bx))
+    iy = max(0, min(ay + ah, by + bh) - max(ay, by))
+    inter = ix * iy
+    return inter >= frac * min(aw * ah, bw * bh)
+
+
 def detect(path):
-    """Return (x, y, w, h) of the webcam overlay, or None if unsure."""
+    """The single most likely host cam, or None. Kept for the CLI."""
     try:
         _load_cv2()
     except ImportError:
@@ -210,19 +248,11 @@ def detect(path):
     frames = _sample_frames(path)
     if len(frames) < 3:
         return None
-    faces = _face_anchors(frames, _cascade())
-    if not faces:
-        return None
-    fh, fw = frames[0].shape[:2]
-    edges = _persistent_edges(frames)
-
-    # A co-stream shows two cams — the host's and a guest's. Take the LARGEST
-    # valid box: on someone's own channel their own cam is the bigger one, and
-    # the credit we burn in names the broadcaster. Picking by detection count
-    # instead put a guest's face under the host's name.
-    boxes = [b for b in (_cam_from_edges(edges, f, fw, fh) for f in faces) if b]
+    boxes = detect_all(path)
     if not boxes:
         return None
+    # Largest wins: on someone's own channel their cam is the bigger one, and
+    # the credit burned into the video names the broadcaster.
     return max(boxes, key=lambda b: b[2] * b[3])
 
 
@@ -232,8 +262,9 @@ def main():
     if not args:
         raise SystemExit("usage: python facecam.py CLIP.mp4 [--debug OUT.png]")
     path = args[0]
-    box = detect(path)
-    print(f"{path}: {box if box else 'no facecam found'}")
+    boxes = detect_all(path)
+    print(f"{path}: {len(boxes)} cam(s) {boxes if boxes else '- none found'}")
+    box = max(boxes, key=lambda b: b[2] * b[3]) if boxes else None
 
     if "--debug" in sys.argv and box:
         out = args[1] if len(args) > 1 else "facecam_debug.png"
