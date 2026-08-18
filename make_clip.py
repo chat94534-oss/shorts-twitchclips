@@ -376,8 +376,10 @@ FACE_IS_THE_CONTENT = {
     # a desktop, a canvas, a dashboard — full width matters, centre crop lands
     # on chat or on nothing
     "Watch Parties", "Science & Technology", "Software and Game Development",
-    "Games + Demos", "Crypto", "Slots", "Virtual Casino", "Sports Betting",
+    "Games + Demos", "Crypto",
 }
+# Gambling categories never reach here — twitch.BLOCKED_CATEGORIES drops them
+# during discovery.
 
 
 def style_for(clip):

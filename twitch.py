@@ -123,6 +123,19 @@ BLOCKED_TITLE = re.compile(
 )
 
 
+# Categories dropped before a clip is ever considered. Gambling content can get
+# a YouTube channel age-restricted or demonetised whatever the framing, and an
+# automated channel has nobody watching each upload to catch it.
+BLOCKED_CATEGORIES = {
+    "slots", "virtual casino", "sports betting", "poker",
+    "casino", "gambling",
+}
+
+
+def category_allowed(name):
+    return str(name or "").strip().lower() not in BLOCKED_CATEGORIES
+
+
 def keep(clip, seen):
     """Pure filter — the one piece worth testing without touching the network."""
     if clip.get("id") in seen:
@@ -179,6 +192,7 @@ def discover_streamer(login, seen=(), hours=WINDOW_HOURS):
     names = game_names([c.get("game_id") for c in pool], cid, token)
     for c in pool:
         c["game_name"] = names.get(c.get("game_id"), "Twitch")
+    pool = [c for c in pool if category_allowed(c["game_name"])]
     pool.sort(key=lambda c: int(c.get("view_count") or 0), reverse=True)
     print(f"{display}: {len(pool)} usable clips of {len(raw)} in the window",
           file=sys.stderr)
@@ -195,6 +209,9 @@ def discover(seen=(), hours=WINDOW_HOURS, games=TOP_GAMES):
     seen = set(seen)
     pool, by_id = [], set()
     for game_id, game_name in top_games(cid, token, games):
+        if not category_allowed(game_name):
+            print(f"  skipping blocked category: {game_name}", file=sys.stderr)
+            continue
         try:
             raw = clips_for_game(cid, token, game_id, started_at)
         except RuntimeError as e:
@@ -226,6 +243,10 @@ def demo():
         assert not keep({**base, "title": bad}, set()), f"should block: {bad}"
     for ok in ("shroud lost it", "warden down", "clutch of the year"):
         assert keep({**base, "title": ok}, set()), f"should allow: {ok}"
+    for blocked in ("Slots", "slots", "Virtual Casino", "Poker"):
+        assert not category_allowed(blocked), f"should block: {blocked}"
+    for allowed in ("Minecraft", "Just Chatting", "Counter-Strike", None):
+        assert category_allowed(allowed), f"should allow: {allowed}"
     print("twitch.py self-check: OK")
 
 
