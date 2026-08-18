@@ -62,15 +62,18 @@ def files_to_scan(staged):
         cmd = ["git", "diff", "--cached", "--name-only", "--diff-filter=ACM"]
     else:
         cmd = ["git", "ls-files"]
-    out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+    out = subprocess.run(cmd, capture_output=True, text=True, check=True,
+                         encoding="utf-8", errors="replace").stdout
     return [f for f in out.splitlines()
             if f and not f.lower().endswith(SKIP_SUFFIXES)]
 
 
 def content(path, staged):
     if staged:
-        p = subprocess.run(["git", "show", f":{path}"],
-                           capture_output=True, text=True)
+        # Explicit utf-8: text=True decodes with the locale codec, which is
+        # cp1252 on Windows and dies on the first non-ASCII byte in any file.
+        p = subprocess.run(["git", "show", f":{path}"], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace")
         return p.stdout if p.returncode == 0 else ""
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
