@@ -62,7 +62,8 @@ HOOK_TAIL_STOPWORDS = {
     "THE", "A", "AN", "AND", "OR", "TO", "AT", "OF", "IN", "ON", "FOR",
     "WITH", "BUT", "IS", "WAS", "HIS", "HER", "THEIR", "MY",
 }
-STYLE = "fill"                           # "fill" (full-frame) or "blur" (letterboxed)
+CREDIT_TOP_Y = 110                       # above the hook; YouTube's UI covers the bottom
+STYLE = "auto"                           # "auto" | "fill" (full-frame) | "blur" (letterboxed)
 
 PRESET = os.environ.get("X264_PRESET", "medium")
 FONT = (r"C\:/Windows/Fonts/arialbd.ttf" if os.name == "nt"
@@ -240,7 +241,7 @@ def _blur_chain(hook_size):
         f"[fg]scale={FG_W}:{FG_H}:force_original_aspect_ratio=decrease:flags=lanczos[fgs];"
         f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2[base];"
         f"[base]{_drawtext('hook.txt', hook_size, f'{HOOK_Y}-text_h')},"
-        f"{_drawtext('credit.txt', CREDIT_SIZE, CREDIT_Y)}[v]"
+        f"{_drawtext('credit.txt', CREDIT_SIZE, CREDIT_TOP_Y)}[v]"
     )
 
 
@@ -255,9 +256,28 @@ def _fill_chain(hook_size):
     return (
         f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
         f"crop={W}:{H},"
-        f"{_drawtext('hook.txt', hook_size, '200', plate=True)},"
-        f"{_drawtext('credit.txt', CREDIT_SIZE, H - 260, plate=True)}[v]"
+        f"{_drawtext('credit.txt', CREDIT_SIZE, CREDIT_TOP_Y, plate=True)},"
+        f"{_drawtext('hook.txt', hook_size, '210', plate=True)}[v]"
     )
+
+
+# Categories whose clips are a DESKTOP — a browser, an editor, a canvas, a
+# dashboard — where the interesting thing is spread across the full width and a
+# centre crop lands on chat or on nothing. These keep the letterbox.
+#
+# Deliberately narrow. Just Chatting, Sports, and IRL are camera footage: they
+# crop fine and look far better filling the frame, so they are NOT listed here.
+SCREEN_SHARE_CATEGORIES = {
+    "Software and Game Development", "Games + Demos", "Art", "Music",
+    "Watch Parties", "Science & Technology",
+}
+
+
+def style_for(clip):
+    """Pick framing per clip: fill for gameplay, blur for everything else."""
+    if STYLE != "auto":
+        return STYLE
+    return "blur" if clip.get("game_name") in SCREEN_SHARE_CATEGORIES else "fill"
 
 
 def fit_hook(text, max_lines=2):
@@ -287,8 +307,13 @@ def fit_hook(text, max_lines=2):
         # Arial Bold averages ~0.58em per character; 1000px is the usable width.
         per_line = max(8, int(1000 / (size * 0.58)))
         wrapped = textwrap.fill(trimmed, per_line)
-        if wrapped.count("\n") + 1 <= max_lines:
-            return wrapped, size
+        lines = wrapped.split("\n")
+        if len(lines) > max_lines:
+            continue
+        # A one- or two-character last line ("...HARD / R") reads as a typo.
+        if len(lines) > 1 and len(lines[-1]) <= 2:
+            continue
+        return wrapped, size
     per_line = max(8, int(1000 / (HOOK_SIZES[-1] * 0.58)))
     return textwrap.fill(trimmed, per_line), HOOK_SIZES[-1]
 
@@ -300,7 +325,7 @@ def render(src, run_dir, copy, out_name="short.mp4", style=None):
     never has to survive a shell round-trip, and ffmpeg runs with cwd set to
     the run folder so those paths stay relative (no Windows drive colons).
     """
-    style = style or STYLE
+    style = style or ("fill" if STYLE == "auto" else STYLE)
     hook_text, hook_size = fit_hook(copy["hook"])
     # newline="\n": on Windows, text mode would write CRLF and drawtext renders
     # the stray CR as a glyph, opening a phantom gap between wrapped lines.
@@ -410,7 +435,8 @@ def produce_one(candidates, state, args, publish_at):
             download_clip(clip["url"], src)
             copy = write_copy(clip)
             log(f"  hook: {copy['hook']}")
-            video = render(src, run_dir, copy, style=args.style)
+            video = render(src, run_dir, copy,
+                           style=args.style or style_for(clip))
         except Exception as e:  # noqa: BLE001
             log(f"  clip failed ({e}); marking spent and taking the next one.")
             state.setdefault("seen", []).append(clip["id"])
@@ -438,9 +464,10 @@ def main():
     ap.add_argument("--privacy", default="public",
                     choices=["public", "unlisted", "private"])
     ap.add_argument("--no-upload", action="store_true")
-    ap.add_argument("--style", default=STYLE, choices=["fill", "blur"],
-                    help="fill = clip covers the whole frame (centre-cropped); "
-                         "blur = whole 16:9 frame letterboxed into a blurred copy")
+    ap.add_argument("--style", default=None, choices=["fill", "blur"],
+                    help="force a framing; default picks per clip — fill "
+                         "(centre-cropped, fills the frame) for gameplay, blur "
+                         "(letterboxed) for chat/IRL categories")
     ap.add_argument("--fill-day", action="store_true",
                     help="build every remaining slot today and hand them to "
                          "YouTube's scheduler")

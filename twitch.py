@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Twitch clip discovery — the top clips of the last day across the hottest games.
+"""Twitch clip discovery — the top clips of the last week across the hottest games.
 
 Helix has no "all of Twitch" clips endpoint: /helix/clips demands a game_id or a
 broadcaster_id. So we ask for the currently hottest games, pull each one's top
@@ -14,6 +14,7 @@ Run standalone to see exactly what the pipeline would pick next:
 import datetime as dt
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -109,11 +110,26 @@ def clips_for_game(cid, token, game_id, started_at, first=CLIPS_PER_GAME):
     }, cid, token)["data"]
 
 
+# Clips whose own title advertises a slur, a hate reference, or self-harm.
+# ponytail: matches the meta-terms clip titles actually use ("says hard r",
+# "n-word") rather than an exhaustive slur list — that keeps this readable in a
+# public repo and catches the realistic cases. It is a coarse net: it will not
+# catch a clip whose title says nothing about its content. Upgrade path if the
+# channel ever takes a strike: review candidates by hand, or add transcript
+# screening.
+BLOCKED_TITLE = re.compile(
+    r"(?i)\b(hard\s*r|n[-\s]?word|slur|racis[tm]|nazi|hitler|"
+    r"kill\s+(my|your|him|her)self|suicide|groom(er|ing))\b"
+)
+
+
 def keep(clip, seen):
     """Pure filter — the one piece worth testing without touching the network."""
     if clip.get("id") in seen:
         return False
     if clip.get("language") != LANGUAGE:
+        return False
+    if BLOCKED_TITLE.search(str(clip.get("title") or "")):
         return False
     dur = float(clip.get("duration") or 0)
     if not (MIN_DURATION <= dur <= MAX_DURATION):
@@ -157,6 +173,11 @@ def demo():
     assert not keep({**base, "duration": 120.0}, set()), "too long must be skipped"
     assert not keep({**base, "view_count": 10}, set()), "low views must be skipped"
     assert not keep({**base, "duration": None, "view_count": None}, set())
+    for bad in ("jynxzi says hard r", "he said the N-word", "RACIST moment",
+                "told him to kill himself"):
+        assert not keep({**base, "title": bad}, set()), f"should block: {bad}"
+    for ok in ("shroud lost it", "warden down", "clutch of the year"):
+        assert keep({**base, "title": ok}, set()), f"should allow: {ok}"
     print("twitch.py self-check: OK")
 
 
