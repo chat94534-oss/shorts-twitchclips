@@ -29,9 +29,13 @@ MAX_DURATION = 60.0
 MIN_VIEWS = 500
 LANGUAGE = "en"
 
-TOP_GAMES = 20      # how many hot games to sample
+TOP_GAMES = 40      # how many hot games to sample
 CLIPS_PER_GAME = 30  # Helix returns these already sorted by view count
-WINDOW_HOURS = 24
+# A week, not a day. Clips need time to accumulate views, so a 24h window's
+# best clip runs ~2k views while a 7-day window's runs ~90k — and a Shorts
+# viewer has no idea (or interest in) how old a Twitch clip is. Measured
+# pools: 24h/20 games = 29 candidates, 168h/40 games = 356.
+WINDOW_HOURS = 168
 
 
 def _load_env():

@@ -16,15 +16,12 @@ import csv
 import datetime as dt
 import json
 import os
-import random
 import re
 import shutil
 import subprocess
 import sys
 import textwrap
 import time
-import urllib.parse
-import urllib.request
 from zoneinfo import ZoneInfo
 
 import twitch
@@ -63,7 +60,6 @@ HOOK_WRAP = 18                           # characters per line at HOOK_SIZE
 PRESET = os.environ.get("X264_PRESET", "medium")
 FONT = (r"C\:/Windows/Fonts/arialbd.ttf" if os.name == "nt"
         else "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf")
-TEXT_MODEL = "openai-fast"  # Pollinations free text model — no API key
 
 
 # --------------------------------------------------------------------------- #
@@ -154,21 +150,6 @@ def _slug(text):
 # --------------------------------------------------------------------------- #
 # copy: hook + metadata
 # --------------------------------------------------------------------------- #
-def _ask_json(prompt):
-    """One GET to Pollinations' free text model; returns a parsed JSON dict."""
-    url = (f"https://text.pollinations.ai/{urllib.parse.quote(prompt)}"
-           f"?model={TEXT_MODEL}&seed={random.randint(1, 10_000_000)}&json=true")
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=90) as r:
-        text = r.read().decode("utf-8", "replace").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\n?", "", text).rsplit("```", 1)[0]
-    a, b = text.find("{"), text.rfind("}")
-    if a == -1 or b == -1:
-        raise ValueError("no JSON object in response")
-    return json.loads(text[a:b + 1])
-
-
 def _clean(text, limit):
     """Strip the emote spam and punctuation noise typical of Twitch titles."""
     text = re.sub(r"\s+", " ", str(text or "")).strip()
@@ -176,36 +157,40 @@ def _clean(text, limit):
     return text[:limit].strip(" -:,")
 
 
+# Used only when a clip's own title is too thin to be a hook ("Cops", "LUL").
+# Deliberately gender-neutral: we have no idea who is on screen.
+GENERIC_HOOKS = [
+    "WAIT FOR IT",
+    "WATCH THE END",
+    "NOBODY EXPECTED THIS",
+    "THIS GOT WILD FAST",
+    "IT ONLY GETS WORSE",
+]
+
+
 def write_copy(clip):
     """Hook line for the video, plus title/description/tags for YouTube.
 
-    The free text model rambles on complex prompts, so we ask it for two short
-    strings only and derive everything else locally. Falls back to the clip's
-    own title, which is always present.
+    ponytail: the hook is the clip's own title, cleaned. Twitch titles are
+    written by a human who just watched the moment, so they are usually already
+    hooks ("shroud lost it", "aimed for the egg, hit the bystanders"). Thin
+    ones fall back to a generic hook picked deterministically by clip id, so a
+    rerun of the same clip produces the same video. Upgrade path: if hooks ever
+    measurably cap retention, swap this for a real LLM call — Pollinations' free
+    text tier returns 402 now, so that means an API key.
     """
     streamer = clip["broadcaster_name"]
     game = clip.get("game_name", "Twitch")
     original = _clean(clip.get("title"), 90)
 
-    hook, title = "", ""
-    try:
-        got = _ask_json(
-            "You write YouTube Shorts copy. A Twitch clip: streamer "
-            f"'{streamer}', game '{game}', clip title '{original}'. "
-            'Reply ONLY as {"hook": "...", "title": "..."} where hook is a '
-            "punchy 3-6 word on-screen teaser in plain words, and title is a "
-            "curiosity-driven YouTube title under 70 characters. No emojis, "
-            "no hashtags, no quotes inside the strings."
-        )
-        hook = _clean(got.get("hook"), 60)
-        title = _clean(got.get("title"), 70)
-    except Exception as e:  # noqa: BLE001
-        log(f"  copy model failed ({e}); falling back to the clip title.")
+    hook = original if len(original) >= 10 and len(original.split()) >= 2 else ""
+    if not hook:
+        idx = sum(ord(c) for c in clip.get("id", "")) % len(GENERIC_HOOKS)
+        hook = GENERIC_HOOKS[idx]
+    hook = hook[:46]
 
-    hook = hook or original or f"{streamer} moment"
-    title = title or original or f"{streamer} - {game}"
-    if "#shorts" not in title.lower():
-        title = f"{title[:60]} #shorts"
+    title = original or f"{streamer} - {game}"
+    title = f"{title[:70]} | {streamer} #shorts"[:100]
 
     description = (
         f"{original}\n\n"
