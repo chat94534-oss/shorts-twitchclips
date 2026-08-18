@@ -7,6 +7,9 @@ or dies on whether the first frame stops a thumb, so the hook is worth one
 model call.
 
 Free tier, one call per video, ~11 a day. Set GEMINI_API_KEY (env or .env).
+Model is a flash-lite on purpose. The free tier allows 20 requests a DAY
+per model, which 11 uploads fit inside and a bulk backfill does not;
+each model name carries its own daily bucket if one runs dry.
 Without a key — or on any error, timeout, or refusal — this returns None and
 make_clip falls back to the clip's own title.
 
@@ -14,13 +17,15 @@ make_clip falls back to the clip's own title.
 """
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 
 import twitch  # for _load_env
 
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 TIMEOUT = 25
+RETRY_WAIT = 20
 HOOK_LIMIT = 30
 TITLE_LIMIT = 70
 
@@ -56,7 +61,8 @@ def _clean(text, limit):
 def write(streamer, game, title, key=None):
     """{"hook", "title"} from Gemini, or None if anything at all goes wrong."""
     twitch._load_env()
-    key = key or os.environ.get("GEMINI_API_KEY", "").strip()
+    if key is None:
+        key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not key:
         return None
 
@@ -77,8 +83,16 @@ def write(streamer, game, title, key=None):
         "x-goog-api-key": key,
     })
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-            data = json.loads(r.read().decode("utf-8", "replace"))
+        for attempt in (0, 1):
+            try:
+                with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                    data = json.loads(r.read().decode("utf-8", "replace"))
+                break
+            except urllib.error.HTTPError as e:
+                # 429 is the per-minute cap, not the daily one. One wait clears it.
+                if e.code != 429 or attempt:
+                    raise
+                time.sleep(RETRY_WAIT)
         text = data["candidates"][0]["content"]["parts"][0]["text"]
         out = json.loads(text)
         hook = _clean(out.get("hook"), HOOK_LIMIT)

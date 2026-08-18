@@ -206,14 +206,29 @@ GENERIC_HOOKS = [
 ]
 
 
+# Past 15 hashtags YouTube ignores every one of them, so this stays well under.
+# The first three render above the title, which is why the clip's own game and
+# streamer go first — those are what someone actually searches.
+HASHTAG_BASE = ["twitch", "twitchclips", "gaming", "gamingclips", "funnymoments",
+                "streamer", "livestream", "twitchhighlights", "clips"]
+
+
 def _hashtags(game, streamer):
     """#shorts plus the words a viewer would actually search."""
-    tags = ["shorts", "twitch", "gaming"]
+    tags = ["shorts"]
     for name in (game, streamer):
         word = "".join(c for c in str(name or "") if c.isalnum()).lower()
         if word and word not in tags:
-            tags.insert(2, word)
-    return " ".join("#" + t for t in tags[:5])
+            tags.append(word)
+    tags += [t for t in HASHTAG_BASE if t not in tags]
+    return " ".join("#" + t for t in tags[:12])
+
+
+def _final_title(text, streamer):
+    """Append the streamer credit only when the title does not already say it."""
+    if streamer and streamer.lower() in text.lower():
+        return f"{text[:88]} #shorts"[:100]
+    return f"{text[:70]} | {streamer} #shorts"[:100]
 
 
 def write_copy(clip):
@@ -241,7 +256,7 @@ def write_copy(clip):
             hook = GENERIC_HOOKS[idx]
         title = original or f"{streamer} - {game}"
     hook = hook[:46]
-    title = f"{title[:70]} | {streamer} #shorts"[:100]
+    title = _final_title(title, streamer)
 
     # Keywords first, links last: YouTube reads the opening lines for topic,
     # and the first three hashtags render above the title.
