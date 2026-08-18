@@ -4,7 +4,7 @@ on:
     # ONE generation run builds all of the day's clips and hands them to
     # YouTube's own scheduler (publishAt), so GitHub cron only has to fire once.
     # Two later checks catch up if the morning run was dropped. Times are UTC.
-    - cron: "0 10 * * *"    # ~6:00a EDT — main generation (before the 8a slot)
+    - cron: "0 9 * * *"     # ~5:00a EDT — main generation (before the 7a slot)
     - cron: "0 16 * * *"    # ~12:00p EDT — catch-up check
     - cron: "0 20 * * *"    # ~4:00p EDT — catch-up check
   workflow_dispatch:
@@ -26,7 +26,7 @@ permissions:
 jobs:
   post:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

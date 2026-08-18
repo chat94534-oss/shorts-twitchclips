@@ -43,10 +43,17 @@ LOCK_FILE = os.path.join(LOGS_DIR, "run.lock")
 KEEP_RUNS_DAYS = 3
 
 TZ = ZoneInfo("America/New_York")
-# Six a day: three morning, three afternoon/evening. Six is the hard ceiling —
-# YouTube's Data API gives 10,000 units/day per Cloud project and each upload
-# costs 1,600, so 6 uploads = 9,600 and a seventh cannot fit.
-PUBLISH_SLOTS = [(8, 0), (10, 0), (12, 0), (15, 0), (18, 0), (21, 0)]
+# Eleven a day: three morning, three afternoon, five at night (night is when
+# Shorts watch time peaks). The API is not the limit here — the project allows
+# 100 uploads/day and an upload costs 1 query of 10,000, so this is a content
+# decision, not a technical one. What it does cost is per-video strength: at 11
+# a day we reach down to the 11th-best clip of the week, and the view-count
+# curve is steep (top clip ~92k, 11th under 20k).
+PUBLISH_SLOTS = [
+    (7, 0), (9, 0), (11, 0),               # morning
+    (13, 0), (15, 0), (17, 0),             # afternoon
+    (19, 0), (20, 0), (21, 0), (22, 0), (23, 0),  # night
+]
 
 W, H, FPS = 1080, 1920, 30
 # The clip sits in a fixed box, scaled to fit (never distorted, never cropped).

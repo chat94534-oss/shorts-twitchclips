@@ -10,7 +10,9 @@ ffmpeg (blurred 9:16 backdrop, clip centered, burned hook + streamer credit) →
 YouTube upload. The workflow commits spent clip ids back to the repo after each
 run.
 
-- **Schedule (EDT):** 12 PM, 3 PM, 6 PM, 9 PM — see `.github/workflows/post.yml`.
+- **Schedule (EDT):** 7, 9, 11 AM; 1, 3, 5 PM; 7, 8, 9, 10, 11 PM — eleven a day,
+  see `.github/workflows/post.yml`. The API is not the constraint: the project
+  allows 100 uploads/day and an upload costs 1 query of 10,000.
   Crons are UTC: **in November (DST ends) bump each cron hour +1** or posts shift
   an hour early.
 - **Secrets (repo settings):** `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET`,
