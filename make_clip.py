@@ -66,6 +66,8 @@ HOOK_TAIL_STOPWORDS = {
     "WITH", "BUT", "IS", "WAS", "HIS", "HER", "THEIR", "MY",
 }
 CREDIT_TOP_Y = 110                       # above the hook; YouTube's UI covers the bottom
+HOOK_HOLD = 3.0                          # seconds the hook and credit stay up
+HOOK_FADE = 0.5                          # seconds to fade them out
 STYLE = "auto"                           # "auto" | "fill" (full-frame) | "blur" (letterboxed)
 
 PRESET = os.environ.get("X264_PRESET", "medium")
@@ -225,13 +227,27 @@ def download_clip(url, out_path):
         raise RuntimeError(f"download produced nothing usable for {url}")
 
 
-def _drawtext(textfile, size, y, plate=False):
-    """One drawtext filter. plate=True adds a dark slab behind the text, which
-    is what keeps it readable when it sits directly on top of footage."""
-    box = ("box=1:boxcolor=black@0.5:boxborderw=16:" if plate else "")
+def _drawtext(textfile, size, y):
+    """One drawtext filter, held for HOLD seconds then faded out.
+
+    The hook earns its keep in the first couple of seconds; after that it is
+    just covering the footage. Both hook and credit fade together.
+
+    No box behind the text: `boxcolor` is a fixed colour, not an expression, so
+    a plate cannot fade with the glyphs and would be left hanging over the
+    video. A heavy border plus a drop shadow does the same readability job and
+    fades with everything else, since alpha applies to the whole glyph render.
+
+    Commas inside the alpha expression are escaped — the filtergraph parser
+    treats a bare comma as the end of this filter.
+    """
+    fade_end = HOOK_HOLD + HOOK_FADE
+    alpha = (f"if(lt(t\\,{HOOK_HOLD})\\,1\\,"
+             f"if(lt(t\\,{fade_end})\\,({fade_end}-t)/{HOOK_FADE}\\,0))")
     return (f"drawtext=fontfile='{FONT}':textfile='{textfile}':"
-            f"fontcolor=white:fontsize={size}:borderw=6:bordercolor=black:"
-            f"{box}line_spacing=0:x=(w-text_w)/2:y={y}")
+            f"fontcolor=white:fontsize={size}:borderw=10:bordercolor=black:"
+            f"shadowcolor=black@0.6:shadowx=0:shadowy=4:"
+            f"alpha='{alpha}':line_spacing=0:x=(w-text_w)/2:y={y}")
 
 
 def _blur_chain(hook_size):
@@ -253,14 +269,13 @@ def _fill_chain(hook_size):
 
     Fills the screen, which is what reads as 'a real Short' rather than a
     reposted strip. The cost is real: a 16:9 source keeps only its middle ~32%
-    horizontally, so action at the frame edges is gone. Text sits on the
-    footage, hence the plate behind it.
+    horizontally, so action at the frame edges is gone.
     """
     return (
         f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
         f"crop={W}:{H},"
-        f"{_drawtext('credit.txt', CREDIT_SIZE, CREDIT_TOP_Y, plate=True)},"
-        f"{_drawtext('hook.txt', hook_size, '210', plate=True)}[v]"
+        f"{_drawtext('credit.txt', CREDIT_SIZE, CREDIT_TOP_Y)},"
+        f"{_drawtext('hook.txt', hook_size, '210')}[v]"
     )
 
 
